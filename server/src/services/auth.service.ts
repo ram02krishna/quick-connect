@@ -174,8 +174,17 @@ export async function login(input: LoginInput) {
   };
 }
 
-export async function forgotPassword(username: string) {
-  const user = await prisma.user.findUnique({ where: { username } });
+export async function forgotPassword(identifier: string) {
+  const trimmed = identifier.trim();
+  const user = await prisma.user.findFirst({
+    where: {
+      OR: [
+        { username: trimmed },
+        { email: encryptDeterministic(trimmed) },
+        { email: encryptDeterministic(trimmed.toLowerCase()) },
+      ],
+    },
+  });
   if (!user) throw new ApiError(404, "User not found");
 
   const email = decryptDeterministic(user.email);

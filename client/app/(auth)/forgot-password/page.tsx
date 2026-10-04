@@ -14,7 +14,7 @@ export default function ForgotPasswordPage() {
   const router = useRouter();
 
   const [step, setStep] = useState(1);
-  const [username, setUsername] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [userId, setUserId] = useState("");
   const [maskedEmail, setMaskedEmail] = useState("");
 
@@ -33,7 +33,10 @@ export default function ForgotPasswordPage() {
     setLoading(true);
 
     try {
-      const res = await api.post("/auth/forgot-password", { username });
+      const res = await api.post("/auth/forgot-password", {
+        identifier: identifier.trim(),
+        username: identifier.trim(),
+      });
       const { userId: uid, email } = res.data.data;
       
       setUserId(uid);
@@ -46,7 +49,7 @@ export default function ForgotPasswordPage() {
       }, 2500);
     } catch (err: any) {
       console.warn("Forgot password lookup failed:", err.message || err);
-      setError(err.response?.data?.message || "Failed to locate account. Check the username.");
+      setError(err.response?.data?.message || "Failed to locate account. Check the username or email.");
     } finally {
       setLoading(false);
     }
@@ -102,13 +105,13 @@ export default function ForgotPasswordPage() {
         <form onSubmit={handleRequestCode} className="space-y-4">
           <div className="space-y-1">
             <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider pl-1">
-              Username
+              Username or Email
             </label>
             <Input
               type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="Enter your username"
+              value={identifier}
+              onChange={(e) => setIdentifier(e.target.value)}
+              placeholder="Enter your username or email"
               required
               disabled={loading}
             />

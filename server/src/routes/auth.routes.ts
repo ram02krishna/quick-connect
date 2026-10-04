@@ -35,9 +35,23 @@ const resendSchema = z.object({
   type: z.string().optional(),
 });
 
-const forgotPasswordSchema = z.object({
-  username: z.string().min(1, "Username is required"),
-});
+const forgotPasswordSchema = z
+  .object({
+    identifier: z.string().optional(),
+    username: z.string().optional(),
+    email: z.string().optional(),
+  })
+  .refine(
+    (data) =>
+      Boolean(
+        (data.identifier && data.identifier.trim().length > 0) ||
+        (data.username && data.username.trim().length > 0) ||
+        (data.email && data.email.trim().length > 0)
+      ),
+    {
+      message: "Username or email is required",
+    }
+  );
 
 const resetPasswordSchema = z.object({
   userId: z.string().uuid("Invalid user ID"),

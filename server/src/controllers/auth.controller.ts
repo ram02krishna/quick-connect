@@ -65,12 +65,12 @@ export async function resendVerification(req: Request, res: Response) {
 }
 
 export async function forgotPassword(req: Request, res: Response) {
-  const { username } = req.body;
-  if (!username) {
-    return res.status(400).json({ success: false, message: "username is required" });
+  const identifier = req.body.identifier || req.body.username || req.body.email;
+  if (!identifier || typeof identifier !== "string" || !identifier.trim()) {
+    return res.status(400).json({ success: false, message: "Username or email is required" });
   }
 
-  const data = await authService.forgotPassword(username);
+  const data = await authService.forgotPassword(identifier.trim());
   return sendSuccess(res, "Password reset code sent", data);
 }
 
