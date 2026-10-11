@@ -89,12 +89,7 @@ export async function handleUserDisconnect(userId: string, socketId: string, io:
   }
 }
 
-/**
- * Batched presence lookup:
- * 1. Fetches all online users in 1 single Redis SMEMBERS call (instead of N SISMEMBER calls).
- * 2. Fetches all last-seen keys in 1 single Redis MGET call (instead of N GET calls).
- * 3. Falls back to database in 1 single SQL query for any missing lastSeen timestamps.
- */
+
 export async function getOnlineStatuses(
   userIds: string[]
 ): Promise<Record<string, { status: "online" | "offline"; lastSeen?: string | null }>> {
