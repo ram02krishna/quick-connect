@@ -77,7 +77,7 @@ const authLimiter = rateLimit({
 
 app.use("/api/auth", authLimiter);
 
-// health check
+// health check 
 app.get("/health", (_req: Request, res: Response) => {
   res.status(200).json({
     status: "ok",
