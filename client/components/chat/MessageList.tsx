@@ -168,7 +168,7 @@ export const MessageList = memo(function MessageList({
           item.kind === "day" ? (
             <DayChip label={item.label} />
           ) : (
-            <div className="mx-auto w-full max-w-4xl px-3 sm:px-5">
+            <div className="w-full px-3 sm:px-5">
               <MessageBubble
                 message={item.message}
                 grouped={item.grouped}
