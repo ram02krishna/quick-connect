@@ -411,4 +411,7 @@ Built by [Ramkrishna](https://github.com/ram02krishna)
 ### Configuration
 - `server/.env.example`: the `DATABASE_URL` line had been swallowed by a comment. `RATE_LIMIT_MAX_REQUESTS` now defaults to 1000 per 15 min; login/OTP endpoints have their own stricter limiter that counts failed attempts only.
 - `client/.env.local.example`: optional `NEXT_PUBLIC_TURN_*` variables. Without a TURN relay, calls between some mobile/corporate networks will not connect.
-- New client dependencies: `@fontsource-variable/instrument-sans`, `@fontsource-variable/fraunces` (run `npm install` in `client/`).
+- New client dependencies: `@fontsource-variable/instrument-sans`, `@fontsource-variable/bricolage-grotesque` (run `npm install` in `client/`).
+
+### Upgrading over an existing checkout
+If you copied these files on top of your old project, delete the old gradient-logo files, which a copy won't remove: `client/app/icon.png` and `client/public/logo.png`. Then hard-refresh (or reopen the tab) because browsers cache favicons aggressively.

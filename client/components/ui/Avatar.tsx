@@ -27,10 +27,10 @@ const sizeClasses = {
 
 const iconSize = { xs: 12, sm: 15, md: 18, lg: 24, xl: 40 } as const;
 
-// Muted, warm tones that sit well on the paper background in both themes.
+// Soft tints with dark text, readable on both themes.
 const tints = [
-  ["#e7d3c4", "#6b3a1f"], ["#d3dfc7", "#34522a"], ["#d0dbe3", "#2c4a63"],
-  ["#e6d6e0", "#5e2f4d"], ["#ecdfb8", "#6b5413"], ["#d6d3e6", "#403a73"],
+  ["#cfe3f0", "#1d4663"], ["#d4ead9", "#215a33"], ["#e3d8f0", "#4a2f78"],
+  ["#f1e0cf", "#6b3d12"], ["#d0ebe8", "#14574f"], ["#f0d5dc", "#6e2139"],
 ];
 
 function tintFor(name?: string | null) {

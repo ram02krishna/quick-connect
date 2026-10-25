@@ -62,13 +62,13 @@ const escapeHtml = (value: string) =>
 
 function otpEmailHtml(heading: string, intro: string, otp: string) {
   return `
-    <div style="font-family: -apple-system, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; color: #1b1a17;">
+    <div style="font-family: -apple-system, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; color: #0e1621;">
       <h2 style="margin: 0 0 12px;">${escapeHtml(heading)}</h2>
       <p style="margin: 0 0 20px; line-height: 1.5;">${escapeHtml(intro)}</p>
-      <div style="background: #f4f1ea; padding: 18px; text-align: center; border-radius: 8px; margin: 0 0 20px;">
+      <div style="background: #e8ecf0; padding: 18px; text-align: center; border-radius: 8px; margin: 0 0 20px;">
         <span style="font-size: 30px; font-weight: 700; letter-spacing: 6px;">${otp}</span>
       </div>
-      <p style="color: #6f6a5d; font-size: 13px; margin: 0;">The code expires in 15 minutes. If you didn't request it, you can ignore this email.</p>
+      <p style="color: #536170; font-size: 13px; margin: 0;">The code expires in 15 minutes. If you didn't request it, you can ignore this email.</p>
     </div>
   `;
 }

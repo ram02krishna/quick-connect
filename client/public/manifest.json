@@ -4,8 +4,8 @@
   "description": "Chat, voice and video calls in one place.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f4f1ea",
-  "theme_color": "#f4f1ea",
+  "background_color": "#e8ecf0",
+  "theme_color": "#e8ecf0",
   "icons": [
     {
       "src": "/icon.svg",

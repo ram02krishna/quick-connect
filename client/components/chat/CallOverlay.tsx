@@ -155,7 +155,7 @@ export function CallOverlay() {
         onPointerUp={() => (drag.current = null)}
         style={pos ? { left: pos.x, top: pos.y } : undefined}
         className={cn(
-          "fixed z-50 w-56 touch-none cursor-grab select-none overflow-hidden rounded-lg border border-white/15 bg-[#161614] text-white active:cursor-grabbing",
+          "fixed z-50 w-56 touch-none cursor-grab select-none overflow-hidden rounded-lg border border-white/15 bg-[#121a20] text-white active:cursor-grabbing",
           !pos && "bottom-4 right-4"
         )}
         role="region"
@@ -194,7 +194,7 @@ export function CallOverlay() {
   const gridCols = tiles <= 1 ? "grid-cols-1" : tiles === 2 ? "grid-cols-1 sm:grid-cols-2" : tiles <= 4 ? "grid-cols-2" : "grid-cols-2 lg:grid-cols-3";
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-[#10100e] text-white" role="dialog" aria-label={`${title} call`} aria-modal="true">
+    <div className="fixed inset-0 z-50 flex flex-col bg-[#0b1014] text-white" role="dialog" aria-label={`${title} call`} aria-modal="true">
       {audioLayer}
 
       <header className="relative z-20 flex shrink-0 items-center justify-between gap-3 px-4 py-3">
@@ -214,7 +214,7 @@ export function CallOverlay() {
             <span className="tabular-nums">{Math.round(callVolume * 100)}%</span>
           </button>
           {showVolume && (
-            <div className="absolute right-0 top-11 z-30 w-56 rounded-lg border border-white/15 bg-[#1c1c19] p-4">
+            <div className="absolute right-0 top-11 z-30 w-56 rounded-lg border border-white/15 bg-[#19232b] p-4">
               <label htmlFor="call-volume" className="mb-2 block text-xs text-white/60">Their volume</label>
               <input
                 id="call-volume"
@@ -224,7 +224,7 @@ export function CallOverlay() {
                 step={0.01}
                 value={callVolume}
                 onChange={(e) => actions().setCallVolume(parseFloat(e.target.value))}
-                className="w-full accent-[#ff8f55]"
+                className="w-full accent-[#4cc3d9]"
               />
             </div>
           )}
@@ -295,7 +295,7 @@ export function CallOverlay() {
               <span className="text-xs text-white/70">Decline</span>
             </div>
             <div className="flex flex-col items-center gap-2">
-              <button type="button" onClick={accept} aria-label="Accept call" className="flex h-12 w-12 items-center justify-center rounded-full bg-[#2f7d4f] text-white hover:bg-[#256b43]">
+              <button type="button" onClick={accept} aria-label="Accept call" className="flex h-12 w-12 items-center justify-center rounded-full bg-[#1f8a4c] text-white hover:bg-[#17703d]">
                 <Phone size={22} />
               </button>
               <span className="text-xs text-white/70">Accept</span>

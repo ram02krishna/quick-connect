@@ -57,7 +57,7 @@ export default function LandingPage() {
           <figure aria-label="Example conversation" className="rounded-lg border border-line bg-surface">
             <figcaption className="flex items-center justify-between border-b border-line px-4 py-3">
               <span className="flex items-center gap-3">
-                <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[#d3dfc7] text-xs font-semibold text-[#34522a]">PN</span>
+                <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[#d4ead9] text-xs font-semibold text-[#215a33]">PN</span>
                 <span>
                   <span className="block text-sm font-semibold leading-tight">Priya Nair</span>
                   <span className="block text-xs text-ok">Online</span>

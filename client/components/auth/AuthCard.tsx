@@ -16,7 +16,7 @@ interface AuthCardProps {
 export function AuthCard({ children, title, subtitle, footer }: AuthCardProps) {
   return (
     <div className="grid min-h-dvh lg:grid-cols-[5fr_6fr]">
-      <aside className="relative hidden flex-col justify-between bg-[#1c1b18] p-12 text-[#f4f1ea] lg:flex dark:border-r dark:border-line dark:bg-[#0c0c0b]">
+      <aside className="relative hidden flex-col justify-between bg-[#0e1621] p-12 text-[#e5ebf0] lg:flex dark:border-r dark:border-line dark:bg-[#070a0d]">
         <Link href="/" className="inline-flex w-fit items-center gap-2">
           <Wordmark className="[&_svg]:text-accent" />
         </Link>
@@ -25,12 +25,12 @@ export function AuthCard({ children, title, subtitle, footer }: AuthCardProps) {
           <p className="font-display text-4xl leading-[1.15]">
             Say it now,<br />or say it face to face.
           </p>
-          <p className="mt-5 text-[15px] leading-relaxed text-[#f4f1ea]/65">
+          <p className="mt-5 text-[15px] leading-relaxed text-[#e5ebf0]/65">
             Direct messages, group chats, voice notes and calls — in a single tab, with nothing to install.
           </p>
         </div>
 
-        <p className="text-sm text-[#f4f1ea]/45">Messages are encrypted before they&apos;re stored.</p>
+        <p className="text-sm text-[#e5ebf0]/45">Messages are encrypted before they&apos;re stored.</p>
       </aside>
 
       <main className="relative flex flex-col px-5 py-6 sm:px-10">

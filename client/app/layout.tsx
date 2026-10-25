@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "@fontsource-variable/instrument-sans";
-import "@fontsource-variable/fraunces";
+import "@fontsource-variable/bricolage-grotesque";
 import "./globals.css";
 import { ThemeProvider } from "../components/ThemeProvider";
 import { ToasterThemed } from "../components/ToasterThemed";
@@ -17,8 +17,8 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f4f1ea" },
-    { media: "(prefers-color-scheme: dark)", color: "#131311" },
+    { media: "(prefers-color-scheme: light)", color: "#e8ecf0" },
+    { media: "(prefers-color-scheme: dark)", color: "#0b1014" },
   ],
 };
 
