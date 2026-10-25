@@ -24,7 +24,7 @@ interface AuthState {
 function syncAuthCookie(token: string | null) {
   if (typeof document === "undefined") return;
   if (token) {
-    document.cookie = `quickconnect_token=${encodeURIComponent(token)}; path=/; max-age=604800; SameSite=Lax`;
+    document.cookie = `quickconnect_token=${encodeURIComponent(token)}; path=/; max-age=604800; SameSite=Lax${location.protocol === "https:" ? "; Secure" : ""}`;
   } else {
     document.cookie = "quickconnect_token=; path=/; max-age=0; SameSite=Lax";
   }

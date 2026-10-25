@@ -1,67 +1,51 @@
 "use client";
 
 import * as React from "react";
-import { useState, useEffect, Suspense } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { AuthCard } from "@components/auth/AuthCard";
+import { AuthCard, FormAlert } from "@components/auth/AuthCard";
 import { Input } from "@components/ui/Input";
 import { Button } from "@components/ui/Button";
-import api from "@lib/api";
+import api, { apiErrorMessage } from "@lib/api";
+
+const RESEND_SECONDS = 60;
 
 function VerifyEmailForm() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-
-  const userId = searchParams.get("userId");
-  const initialEmail = searchParams.get("email") || "your email";
-  const phone = searchParams.get("phone") || "";
+  const params = useSearchParams();
+  const userId = params.get("userId");
+  const email = params.get("email") || "your email address";
 
   const [otp, setOtp] = useState("");
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
+  const [verified, setVerified] = useState(false);
   const [resending, setResending] = useState(false);
-  const [resendCooldown, setResendCooldown] = useState(60); // Start with 60s cooldown
+  const [cooldown, setCooldown] = useState(RESEND_SECONDS);
+  const redirectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const formatDuration = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-  };
-
-  // decrement timer for resending OTP
   useEffect(() => {
-    if (resendCooldown <= 0) return;
-    const timer = setTimeout(() => setResendCooldown(resendCooldown - 1), 1000);
-    return () => clearTimeout(timer);
-  }, [resendCooldown]);
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!userId) {
-      setError("Missing user session ID. Please try signing up again.");
-      return;
-    }
+  useEffect(() => () => clearTimeout(redirectTimer.current), []);
 
+  const verify = async (code: string) => {
+    if (!userId || loading) return;
     setError("");
-    setSuccess("");
+    setNotice("");
     setLoading(true);
-
     try {
-      await api.post("/auth/verify-email", {
-        userId,
-        otp: otp.trim(),
-      });
-
-      setSuccess("Email verified successfully! Redirecting you to login...");
-      setTimeout(() => {
-        router.push("/login");
-      }, 2000);
-    } catch (err: any) {
-      console.warn("Email verification failed:", err.message || err);
-      setError(err.response?.data?.message || "Invalid or expired code. Please try again.");
-    } finally {
+      await api.post("/auth/verify-email", { userId, otp: code });
+      setVerified(true);
+      redirectTimer.current = setTimeout(() => router.push("/login"), 1500);
+    } catch (err) {
+      setError(apiErrorMessage(err, "That code didn't work. Please try again."));
+      setOtp("");
       setLoading(false);
     }
   };
@@ -69,98 +53,79 @@ function VerifyEmailForm() {
   const handleResend = async () => {
     if (!userId) return;
     setError("");
-    setSuccess("");
+    setNotice("");
     setResending(true);
-
     try {
-      await api.post("/auth/resend-verification", {
-        userId,
-        type: "EMAIL",
-      });
-      setSuccess("A new verification code has been sent!");
-      setResendCooldown(60); // 60s time delay to resend OTP
-    } catch (err: any) {
-      console.warn("Resend email code failed:", err.message || err);
-      setError(err.response?.data?.message || "Failed to resend code.");
+      await api.post("/auth/resend-verification", { userId });
+      setNotice("A new code is on its way.");
+      setCooldown(RESEND_SECONDS);
+    } catch (err) {
+      setError(apiErrorMessage(err, "Couldn't send a new code."));
     } finally {
       setResending(false);
     }
   };
 
+  if (!userId) {
+    return (
+      <AuthCard title="Link incomplete" subtitle="This verification link is missing information.">
+        <Link href="/signup" className="text-sm font-medium underline underline-offset-4">Back to sign up</Link>
+      </AuthCard>
+    );
+  }
+
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
-      {error && (
-        <div className="p-3.5 rounded-xl border border-red-500/20 bg-red-500/10 text-sm text-red-400 font-medium">
-          {error}
-        </div>
-      )}
+    <AuthCard
+      title="Check your email"
+      subtitle={`We sent a 6-digit code to ${email}. It's valid for 15 minutes.`}
+      footer={<Link href="/login" className="underline underline-offset-4 hover:text-accent">Back to sign in</Link>}
+    >
+      <form
+        onSubmit={(e) => { e.preventDefault(); void verify(otp); }}
+        className="space-y-5"
+      >
+        {error && <FormAlert tone="error">{error}</FormAlert>}
+        {notice && <FormAlert tone="info">{notice}</FormAlert>}
+        {verified && <FormAlert tone="success">Email confirmed. Taking you to sign in…</FormAlert>}
 
-      {success && (
-        <div className="p-3.5 rounded-xl border border-green-500/20 bg-green-500/10 text-sm text-green-400 font-medium">
-          {success}
-        </div>
-      )}
-
-      <div className="space-y-2 text-center mb-2">
-        <p className="text-sm text-zinc-400">
-          We have sent a 6-digit verification code to
-          <br />
-          <strong className="text-zinc-200">{initialEmail}</strong>
-        </p>
-      </div>
-
-      <div className="space-y-1">
-        <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider pl-1">
-          Verification Code
-        </label>
         <Input
-          type="text"
+          label="Verification code"
+          inputMode="numeric"
+          autoComplete="one-time-code"
           maxLength={6}
           value={otp}
-          onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
-          placeholder="123456"
-          className="text-center text-2xl tracking-[0.5em] font-bold"
-          required
-          disabled={loading}
+          onChange={(e) => {
+            const digits = e.target.value.replace(/\D/g, "").slice(0, 6);
+            setOtp(digits);
+            if (digits.length === 6) void verify(digits); // submit as soon as the last digit lands
+          }}
+          placeholder="000000"
+          className="h-14 text-center font-mono text-2xl tracking-[0.4em]"
+          autoFocus
+          disabled={loading || verified}
         />
-      </div>
 
-      <Button type="submit" variant="shimmer" className="w-full mt-2 py-3" disabled={loading || !!success}>
-        {loading ? "Verifying..." : "Verify Code"}
-      </Button>
+        <Button type="submit" size="lg" className="w-full" disabled={loading || verified || otp.length !== 6}>
+          {loading ? "Checking…" : "Confirm email"}
+        </Button>
 
-      <div className="flex flex-col items-center gap-4 mt-6 text-sm text-zinc-500">
         <button
           type="button"
           onClick={handleResend}
-          disabled={resending || resendCooldown > 0 || !userId}
-          className="text-brand-primary hover:text-brand-hover font-semibold transition-colors disabled:opacity-50 disabled:pointer-events-none cursor-pointer"
+          disabled={resending || cooldown > 0 || verified}
+          className="text-sm text-muted underline underline-offset-4 hover:text-accent disabled:no-underline disabled:opacity-60"
         >
-          {resending
-            ? "Resending..."
-            : resendCooldown > 0
-            ? `Resend code in ${formatDuration(resendCooldown)}`
-            : "Resend Code"}
+          {resending ? "Sending…" : cooldown > 0 ? `Send a new code in ${cooldown}s` : "Send a new code"}
         </button>
-
-        <p className="text-xs text-zinc-400 -mt-2">
-          OTP is valid for 3 minutes.
-        </p>
-
-        <Link href="/login" className="hover:text-zinc-300 transition-colors">
-          Back to Login
-        </Link>
-      </div>
-    </form>
+      </form>
+    </AuthCard>
   );
 }
 
 export default function VerifyEmailPage() {
   return (
-    <AuthCard title="Verify Email" subtitle="Enter your 6-digit confirmation code">
-      <Suspense fallback={<div className="text-center text-zinc-400">Loading params...</div>}>
-        <VerifyEmailForm />
-      </Suspense>
-    </AuthCard>
+    <Suspense fallback={null}>
+      <VerifyEmailForm />
+    </Suspense>
   );
 }

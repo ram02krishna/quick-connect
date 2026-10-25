@@ -8,7 +8,11 @@ const envSchema = z.object({
     .enum(["development", "production", "test"])
     .default("development"),
   PORT: z.string().default("5000"),
-  CLIENT_URL: z.string().url(),
+  // Normalised: a trailing slash would silently break the CORS origin match.
+  CLIENT_URL: z
+    .string()
+    .url()
+    .transform((value) => value.replace(/\/+$/, "")),
 
   DATABASE_URL: z.string(),
 
@@ -27,7 +31,7 @@ const envSchema = z.object({
   CLOUDINARY_API_SECRET: z.string(),
 
   RATE_LIMIT_WINDOW_MS: z.string().default("900000"),
-  RATE_LIMIT_MAX_REQUESTS: z.string().default("5000"),
+  RATE_LIMIT_MAX_REQUESTS: z.string().default("1000"),
 });
 
 const parsed = envSchema.safeParse(process.env);

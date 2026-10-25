@@ -1,11 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
-import { X, Download, Maximize, ZoomIn, FileText, Loader2 } from "lucide-react";
-import { API_BASE_URL } from "@lib/api";
-import { useAuthStore } from "@hooks/useAuthStore";
+import { useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { Download, Loader2, X } from "lucide-react";
+import { downloadFile } from "@lib/download";
 
 interface MediaLightboxProps {
   isOpen: boolean;
@@ -16,112 +15,57 @@ interface MediaLightboxProps {
 }
 
 export function MediaLightbox({ isOpen, onClose, mediaUrl, mediaType, fileName = "File" }: MediaLightboxProps) {
-  const token = useAuthStore((state) => state.token);
-  const [iframeLoading, setIframeLoading] = useState(true);
-  const [mounted, setMounted] = useState(false);
+  const [frameLoading, setFrameLoading] = useState(true);
 
-  // Reset loading status when mediaUrl changes
-  useEffect(() => {
-    setIframeLoading(true);
-  }, [mediaUrl]);
+  return (
+    <Dialog.Root open={isOpen} onOpenChange={(open) => !open && onClose()}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-[70] animate-fade bg-black/90" />
+        <Dialog.Content
+          className="fixed inset-0 z-[71] flex flex-col focus:outline-none"
+          onClick={onClose}
+          aria-describedby={undefined}
+        >
+          <Dialog.Title className="sr-only">{fileName}</Dialog.Title>
 
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+          <div className="flex h-14 shrink-0 items-center justify-between px-4 text-white" onClick={(e) => e.stopPropagation()}>
+            <span className="truncate pr-4 text-sm font-medium">{fileName}</span>
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={() => void downloadFile(mediaUrl, fileName)}
+                aria-label="Download"
+                className="flex h-9 w-9 items-center justify-center rounded-md hover:bg-white/15"
+              >
+                <Download size={18} />
+              </button>
+              <Dialog.Close aria-label="Close" className="flex h-9 w-9 items-center justify-center rounded-md hover:bg-white/15">
+                <X size={20} />
+              </Dialog.Close>
+            </div>
+          </div>
 
-  // Listen for Escape key to close
-  useEffect(() => {
-    if (!isOpen) return;
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
-
-  if (!isOpen || !mounted) return null;
-
-  const handleDownload = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    // Proxy download to retain original filename and extension
-    const downloadUrl = `${API_BASE_URL}/media/download?url=${encodeURIComponent(mediaUrl)}&name=${encodeURIComponent(fileName)}`;
-    window.location.href = downloadUrl;
-  };
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[9999] flex flex-col items-center justify-center bg-black/95 select-none p-4 md:p-6 backdrop-blur-md animate-fade-in"
-      onClick={onClose}
-    >
-      
-      {/* Top Header Bar */}
-      <div className="absolute top-0 left-0 right-0 h-16 bg-gradient-to-b from-black/80 to-transparent flex items-center justify-between px-6 text-white z-50">
-        <div className="flex items-center gap-2 min-w-0">
-          {mediaType === "PDF" && <FileText size={18} className="text-zinc-500 flex-shrink-0" />}
-          <span className="text-base font-bold truncate max-w-xs md:max-w-md drop-shadow-md">{fileName}</span>
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={handleDownload}
-            className="w-9 h-9 rounded-full bg-black/40 hover:bg-black/60 text-zinc-200 hover:text-white transition-all duration-200 cursor-pointer backdrop-blur-md border border-white/10 flex items-center justify-center shadow-lg"
-            title="Download file"
-          >
-            <Download size={16} />
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-9 h-9 rounded-full bg-black/40 hover:bg-black/60 text-zinc-200 hover:text-white transition-all duration-200 cursor-pointer backdrop-blur-md border border-white/10 flex items-center justify-center shadow-lg"
-            title="Close"
-          >
-            <X size={18} />
-          </button>
-        </div>
-      </div>
-
-      {/* Main Content Area */}
-      <div
-        className="w-full flex-1 flex items-center justify-center relative overflow-hidden mt-10"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {mediaType === "IMAGE" && (
-          <img
-            src={mediaUrl}
-            alt={fileName}
-            className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl animate-scale-up select-none pointer-events-none"
-          />
-        )}
-
-        {mediaType === "VIDEO" && (
-          <video
-            src={mediaUrl}
-            controls
-            autoPlay
-            className="max-w-full max-h-[85vh] object-contain rounded-lg shadow-2xl animate-scale-up"
-          />
-        )}
-
-        {mediaType === "PDF" && (
-          <div className="w-full h-full max-w-5xl max-h-[85vh] rounded-2xl overflow-hidden shadow-2xl border border-white/10 bg-[#1f2c34]/50 backdrop-blur-md p-1.5 animate-scale-up relative">
-            {iframeLoading && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#1f2c34]/80 text-white gap-2 rounded-xl z-20">
-                <Loader2 className="animate-spin text-zinc-500" size={32} />
-                <span className="text-base font-semibold">Loading document...</span>
+          <div className="flex min-h-0 flex-1 items-center justify-center p-4 pt-0">
+            {mediaType === "IMAGE" && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={mediaUrl} alt={fileName} onClick={(e) => e.stopPropagation()} className="max-h-full max-w-full rounded object-contain" />
+            )}
+            {mediaType === "VIDEO" && (
+              <video src={mediaUrl} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} className="max-h-full max-w-full rounded" />
+            )}
+            {mediaType === "PDF" && (
+              <div className="relative h-full w-full max-w-5xl overflow-hidden rounded bg-white" onClick={(e) => e.stopPropagation()}>
+                {frameLoading && (
+                  <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
+                    <Loader2 className="animate-spin" size={26} />
+                  </div>
+                )}
+                <iframe src={mediaUrl} title={fileName} onLoad={() => setFrameLoading(false)} className="h-full w-full border-0" />
               </div>
             )}
-            <iframe
-              src={mediaUrl}
-              onLoad={() => setIframeLoading(false)}
-              className="w-full h-full border-none rounded-xl bg-white select-text"
-              title={fileName}
-            />
           </div>
-        )}
-      </div>
-
-    </div>,
-    document.body
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

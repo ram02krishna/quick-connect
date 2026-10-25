@@ -1,121 +1,105 @@
 "use client";
 
 import * as React from "react";
-import { useEffect, useState } from "react";
-import { useRouter, usePathname } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 import { useAuthStore } from "@hooks/useAuthStore";
 import { useSocketStore } from "@hooks/useSocketStore";
 import { useChatStore } from "@hooks/useChatStore";
+import { useUIStore } from "@hooks/useUIStore";
 import { Sidebar } from "@components/sidebar/Sidebar";
 import { CallOverlay } from "@components/chat/CallOverlay";
-import { useUIStore } from "@hooks/useUIStore";
+import { LogoMark } from "@components/Logo";
 import api from "@lib/api";
+import { cn } from "@lib/utils";
+
+function Splash() {
+  return (
+    <div className="flex h-dvh items-center justify-center bg-paper">
+      <LogoMark size={40} className="animate-pulse text-accent" />
+    </div>
+  );
+}
 
 export default function ChatLayout({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
   const pathname = usePathname();
-  
-  const token = useAuthStore((state) => state.token);
-  const connectSocket = useSocketStore((state) => state.connectSocket);
-  const setChats = useChatStore((state) => state.setChats);
-  const setOnlineStatuses = useChatStore((state) => state.setOnlineStatuses);
 
-  const [mounted, setMounted] = useState(false);
-  const [isHydrated, setIsHydrated] = useState(false);
-  
-  const isSidebarOpen = useUIStore((state) => state.isSidebarOpen);
+  const token = useAuthStore((s) => s.token);
+  const connectSocket = useSocketStore((s) => s.connectSocket);
+  const reconnectCount = useSocketStore((s) => s.reconnectCount);
+  const isSidebarOpen = useUIStore((s) => s.isSidebarOpen);
+
+  // The persisted auth store only exists in the browser, so hydration is checked after mount.
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    setMounted(true);
-    
-    if (useAuthStore.persist.hasHydrated()) {
-      setIsHydrated(true);
-    } else {
-      const unsub = useAuthStore.persist.onFinishHydration(() => setIsHydrated(true));
-      return () => {
-        if (unsub) unsub();
-      };
+    const persist = useAuthStore.persist;
+    if (persist.hasHydrated()) {
+      setHydrated(true);
+      return;
     }
+    return persist.onFinishHydration(() => setHydrated(true));
   }, []);
 
-  // Force redirect to login if unauthenticated
+  // Not signed in → go to login, remembering where the user was headed.
   useEffect(() => {
-    if (isHydrated && mounted) {
-      const currentToken = useAuthStore.getState().token;
-      if (!currentToken) {
-        const returnUrl = pathname && pathname !== "/" ? `?redirect=${encodeURIComponent(pathname)}` : "";
-        window.location.replace(`/login${returnUrl}`);
-      }
+    if (hydrated && !token) {
+      const returnTo = pathname && pathname !== "/" ? `?redirect=${encodeURIComponent(pathname)}` : "";
+      window.location.replace(`/login${returnTo}`);
     }
-  }, [isHydrated, mounted, token, pathname]);
+  }, [hydrated, token, pathname]);
 
-  // Connect socket and fetch chats list on mount
+  // Open the socket once we have a token.
+  useEffect(() => {
+    if (token) connectSocket(token);
+  }, [token, connectSocket]);
+
+  // Load the chat list at sign-in and again after a reconnect (messages may have arrived meanwhile).
   useEffect(() => {
     if (!token) return;
+    let cancelled = false;
 
-    // Connect socket
-    connectSocket(token);
-
-    // Fetch and verify user chats
-    const fetchData = async () => {
+    (async () => {
       try {
-        const chatsRes = await api.get("/chats");
-        
-        // Setup chats
-        const chats = chatsRes.data.data.chats;
-        setChats(chats);
-        
-        // Extract online statuses
-        const statuses = chatsRes.data.data.onlineStatuses || {};
-        setOnlineStatuses(statuses);
-        
-      } catch (err: any) {
+        const res = await api.get("/chats");
+        if (cancelled) return;
+        useChatStore.getState().setChats(res.data.data.chats);
+        useChatStore.getState().setOnlineStatuses(res.data.data.onlineStatuses || {});
+      } catch (err) {
         console.error("Failed to load chats:", err);
-        if (err.response?.status === 401) {
-          useAuthStore.getState().logout();
-          window.location.replace(`/login?redirect=${encodeURIComponent(pathname)}`);
-        }
+        if (!cancelled) useChatStore.getState().setIsChatsLoading(false);
       }
-    };
+    })();
 
-    void fetchData();
-  }, [token, connectSocket, setChats, setOnlineStatuses, pathname]);
+    return () => { cancelled = true; };
+  }, [token, reconnectCount]);
 
-  if (!mounted || !isHydrated || !token) {
-    return null;
-  }
+  if (!hydrated || !token) return <Splash />;
 
-  const isRootChats = pathname === "/chats";
+  const isRoot = pathname === "/chats";
 
   return (
-    <div className="flex h-[100dvh] w-full overflow-hidden bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 relative select-none">
-      {/* Main Dashboard Layout Container */}
-      <div className="flex w-full h-full relative z-10">
-        <div
-          className={`flex-shrink-0 h-full transition-all duration-300 overflow-hidden ${
-            isRootChats ? "block w-full" : "hidden"
-          } md:block ${
-            isSidebarOpen 
-              ? "md:w-[280px] lg:w-[320px] md:border-r border-zinc-200/60 dark:border-white/5" 
-              : "md:w-0 md:border-none"
-          }`}
-        >
-          <div className="w-full md:w-[280px] lg:w-[320px] h-full">
+    <div className="relative flex h-dvh w-full overflow-hidden bg-paper text-ink">
+      <div
+        className={cn(
+          "h-full shrink-0 border-r border-line bg-surface transition-[width] duration-200",
+          isRoot ? "w-full" : "hidden",
+          "md:block",
+          isSidebarOpen ? "md:w-[340px]" : "md:w-0 md:overflow-hidden md:border-r-0"
+        )}
+      >
+        <div className="h-full w-full md:w-[340px]">
+          <Suspense fallback={null}>
             <Sidebar />
-          </div>
-        </div>
-
-        {/* Center Main View column */}
-        <div
-          className={`flex-1 h-full min-w-0 flex flex-col relative bg-[#f0f2f5] dark:bg-[#0b141a] ${
-            isRootChats ? "hidden md:flex" : "flex"
-          }`}
-        >
-          {/* WebRTC Call Interface Constrained to Chat Section */}
-          <CallOverlay />
-          {children}
+          </Suspense>
         </div>
       </div>
+
+      <div className={cn("relative min-w-0 flex-1 flex-col", isRoot ? "hidden md:flex" : "flex")}>
+        {children}
+      </div>
+
+      <CallOverlay />
     </div>
   );
 }

@@ -40,13 +40,24 @@ app.use(
   })
 );
 
+// Download links may carry a session token in the query string; never write it to logs.
+morgan.token("safe-url", (req) =>
+  (req as Request).originalUrl.replace(/([?&]token=)[^&]*/gi, "$1[redacted]")
+);
+
 if (env.NODE_ENV !== "test") {
-  app.use(morgan(env.NODE_ENV === "development" ? "dev" : "combined"));
+  app.use(
+    morgan(
+      env.NODE_ENV === "development"
+        ? ":method :safe-url :status :response-time ms"
+        : ':remote-addr ":method :safe-url HTTP/:http-version" :status :res[content-length] ":user-agent"'
+    )
+  );
 }
 
 app.use(compression());
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use(cookieParser(env.COOKIE_SECRET));
 
 // rate limiter for all api routes
@@ -63,19 +74,7 @@ const globalLimiter = rateLimit({
 
 app.use("/api", globalLimiter);
 
-// stricter limiter for auth endpoints
-const authLimiter = rateLimit({
-  windowMs: 30 * 1000,
-  limit: 5000,
-  standardHeaders: "draft-8",
-  legacyHeaders: false,
-  message: {
-    success: false,
-    message: "Too many auth attempts — please try again in 30 seconds.",
-  },
-});
-
-app.use("/api/auth", authLimiter);
+// (credential/email-specific limiters are attached to the individual auth routes)
 
 // health check 
 app.get("/health", (_req: Request, res: Response) => {

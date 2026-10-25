@@ -2,42 +2,59 @@ import * as React from "react";
 import { cn } from "../../lib/utils";
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: "primary" | "secondary" | "glass" | "ghost" | "shimmer";
+  variant?: "primary" | "accent" | "secondary" | "ghost" | "danger";
   size?: "sm" | "md" | "lg";
 }
 
-export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant = "primary", size = "md", ...props }, ref) => {
-    return (
-      <button
-        ref={ref}
-        className={cn(
-          "inline-flex items-center justify-center rounded-xl font-semibold transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-primary/50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer select-none border border-transparent",
-          {
-            // Primary
-            "bg-sky-600 text-white shadow-sm shadow-sky-600/20 hover:bg-sky-700 active:bg-sky-800 dark:bg-sky-500 dark:hover:bg-sky-400 dark:active:bg-sky-600":
-              variant === "primary" || variant === "shimmer",
-            // Secondary
-            "bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-100 hover:bg-zinc-200 dark:hover:bg-zinc-700 active:bg-zinc-300 dark:active:bg-zinc-600":
-              variant === "secondary",
-            // Glass 
-            "bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-white dark:hover:bg-zinc-700 active:bg-zinc-100":
-              variant === "glass",
-            // Ghost — text only
-            "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-white/5":
-              variant === "ghost",
-          },
-          {
-            "px-3 py-1.5 text-sm": size === "sm",
-            "px-4 py-2 text-sm": size === "md",
-            "px-6 py-2.5 text-base": size === "lg",
-          },
-          className
-        )}
-        {...props}
-      />
-    );
-  }
-);
+const variants = {
+  primary: "bg-ink text-paper hover:opacity-90",
+  accent: "bg-accent text-accent-ink hover:bg-accent-strong",
+  secondary: "border border-line bg-surface text-ink hover:bg-sunken",
+  ghost: "text-muted hover:bg-sunken hover:text-ink",
+  danger: "bg-danger text-paper hover:opacity-90",
+} as const;
 
+const sizes = {
+  sm: "h-8 px-3 text-sm gap-1.5",
+  md: "h-10 px-4 text-sm gap-2",
+  lg: "h-12 px-6 text-base gap-2",
+} as const;
+
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant = "primary", size = "md", type = "button", ...props }, ref) => (
+    <button
+      ref={ref}
+      type={type}
+      className={cn(
+        "inline-flex items-center justify-center rounded-md font-medium whitespace-nowrap transition-colors select-none",
+        "disabled:pointer-events-none disabled:opacity-50",
+        variants[variant],
+        sizes[size],
+        className
+      )}
+      {...props}
+    />
+  )
+);
 Button.displayName = "Button";
+
+export const IconButton = React.forwardRef<
+  HTMLButtonElement,
+  React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; active?: boolean; tone?: "default" | "danger" }
+>(({ className, label, active, tone = "default", type = "button", ...props }, ref) => (
+  <button
+    ref={ref}
+    type={type}
+    aria-label={label}
+    title={label}
+    className={cn(
+      "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md transition-colors",
+      "disabled:pointer-events-none disabled:opacity-40",
+      tone === "danger" ? "text-muted hover:bg-danger-soft hover:text-danger" : "text-muted hover:bg-sunken hover:text-ink",
+      active && "bg-sunken text-ink",
+      className
+    )}
+    {...props}
+  />
+));
+IconButton.displayName = "IconButton";

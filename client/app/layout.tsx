@@ -1,40 +1,34 @@
 import type { Metadata, Viewport } from "next";
-import { Outfit } from "next/font/google";
+import "@fontsource-variable/instrument-sans";
+import "@fontsource-variable/fraunces";
 import "./globals.css";
 import { ThemeProvider } from "../components/ThemeProvider";
+import { ToasterThemed } from "../components/ToasterThemed";
 import { Analytics } from "@vercel/analytics/react";
 
-const outfit = Outfit({
-  subsets: ["latin"],
-  weight: ["300", "400", "500", "600", "700", "800"],
-  variable: "--font-outfit",
-  display: "swap",
-});
-
 export const metadata: Metadata = {
-  title: "QuickConnect",
-  description: "A beautiful, real-time chat application inspired by WhatsApp and modern messengers.",
+  title: { default: "QuickConnect", template: "%s · QuickConnect" },
+  description: "Chat, voice and video calls in one place. Direct messages, groups, voice notes and file sharing.",
   manifest: "/manifest.json",
 };
 
+// Pinch-zoom stays enabled — disabling it is an accessibility failure.
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false,
-  themeColor: "#3b82f6",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f4f1ea" },
+    { media: "(prefers-color-scheme: dark)", color: "#131311" },
+  ],
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${outfit.variable}`} suppressHydrationWarning>
-      <body className="font-sans antialiased">
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+    <html lang="en" suppressHydrationWarning>
+      <body className="antialiased">
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           {children}
+          <ToasterThemed />
           <Analytics />
         </ThemeProvider>
       </body>

@@ -1,307 +1,241 @@
 "use client";
 
 import * as React from "react";
-import { useEffect, useState, use, useCallback, useMemo } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { useChatStore } from "@hooks/useChatStore";
 import { useSocketStore } from "@hooks/useSocketStore";
 import { useAuthStore } from "@hooks/useAuthStore";
 import { ChatHeader } from "@components/chat/ChatHeader";
 import { MessageList } from "@components/chat/MessageList";
-import { MessageInput } from "@components/chat/MessageInput";
+import { MessageInput, type OutgoingAttachment } from "@components/chat/MessageInput";
+import { ForwardMessageModal } from "@components/chat/ForwardMessageModal";
 import { ProfilePanel } from "@components/profile/ProfilePanel";
-import api from "@lib/api";
-import { toast } from "sonner";
+import api, { apiErrorMessage } from "@lib/api";
+import { loadLatestMessages, PAGE_SIZE, refreshChat } from "@lib/chatLoader";
 
-const EMPTY_MESSAGES: any[] = [];
+const NO_MESSAGES: any[] = [];
 
 export default function ChatDetailPage({ params }: { params: Promise<{ chatId: string }> }) {
-  const resolvedParams = use(params);
-  const chatId = resolvedParams.chatId;
+  const { chatId } = use(params);
   const router = useRouter();
 
-  const user = useAuthStore((state) => state.user);
-  const token = useAuthStore((state) => state.token);
-  const socket = useSocketStore((state) => state.socket);
-  const isConnected = useSocketStore((state) => state.isConnected);
-  
-  const selectedChatId = useChatStore((state) => state.selectedChatId);
-  const setSelectedChatId = useChatStore((state) => state.setSelectedChatId);
-  const messages = useChatStore((state) => state.messages[chatId] ?? EMPTY_MESSAGES);
-  const setMessages = useChatStore((state) => state.setMessages);
-  const addMessage = useChatStore((state) => state.addMessage);
-  const upsertChat = useChatStore((state) => state.upsertChat);
+  const user = useAuthStore((s) => s.user);
+  const socket = useSocketStore((s) => s.socket);
+  const isConnected = useSocketStore((s) => s.isConnected);
+  const reconnectCount = useSocketStore((s) => s.reconnectCount);
 
-  const [showProfilePanel, setShowProfilePanel] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [accessDenied, setAccessDenied] = useState(false);
-  const [hasSetSelected, setHasSetSelected] = useState(false);
+  const messages = useChatStore((s) => s.messages[chatId] ?? NO_MESSAGES);
+  const chatExists = useChatStore((s) => s.chats.some((c) => c.id === chatId));
+
+  const [showInfo, setShowInfo] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [forwarding, setForwarding] = useState<any | null>(null);
 
-  const [searchQuery, setSearchQuery] = useState("");
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [activeSearchMatch, setActiveSearchMatch] = useState(0);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [activeMatch, setActiveMatch] = useState(0);
 
-  const searchMatches = useMemo(() => {
-    const query = searchQuery.trim().toLocaleLowerCase();
-    if (!query) return [];
-    return messages.filter((message) => {
-      const attachmentNames = (message.attachments || [])
-        .map((attachment: any) => attachment.fileName || "")
-        .join(" ");
-      return `${message.content || ""} ${attachmentNames}`.toLocaleLowerCase().includes(query);
-    });
-  }, [messages, searchQuery]);
+  const hasLoaded = useRef(false);
 
+  // ── which chat is open ──────────────────────────────────────────────────────
   useEffect(() => {
-    setActiveSearchMatch(0);
-  }, [searchQuery]);
-
-  const navigateSearch = useCallback((direction: "up" | "down") => {
-    if (searchMatches.length === 0) return;
-    setActiveSearchMatch((current) =>
-      direction === "down"
-        ? (current + 1) % searchMatches.length
-        : (current - 1 + searchMatches.length) % searchMatches.length
-    );
-  }, [searchMatches.length]);
-
-  // Redirect back to chats list if the selected chat ID gets cleared/deleted
-  useEffect(() => {
-    if (selectedChatId === chatId) {
-      setHasSetSelected(true);
-    } else if (hasSetSelected && selectedChatId === null) {
-      router.push("/chats");
-    }
-  }, [selectedChatId, chatId, hasSetSelected, router]);
-
-  // 1. Join Socket Room on Chat Load
-  useEffect(() => {
-    setSelectedChatId(chatId);
-
-    if (socket && isConnected) {
-      socket.emit("chat:join", { chatId });
-    }
-
+    useChatStore.getState().setSelectedChatId(chatId);
     return () => {
-      if (socket) {
-        socket.emit("chat:leave", { chatId });
-        setSelectedChatId(null);
-      }
+      if (useChatStore.getState().selectedChatId === chatId) useChatStore.getState().setSelectedChatId(null);
     };
-  }, [chatId, socket, isConnected, setSelectedChatId]);
-
-  // 2. Strict Authentication & Membership Verification on Direct URL Open
-  useEffect(() => {
-    let isCancelled = false;
-
-    const verifyAndLoadChat = async () => {
-      const currentToken = useAuthStore.getState().token;
-      if (!currentToken) {
-        window.location.replace(`/login?redirect=${encodeURIComponent(window.location.pathname)}`);
-        return;
-      }
-
-      setLoading(true);
-      try {
-        // Step A: Verify chat existence and user membership with backend
-        const chatRes = await api.get(`/chats/${chatId}`);
-        if (isCancelled) return;
-        
-        const fetchedChat = chatRes.data.data.chat;
-        upsertChat(fetchedChat);
-
-        // Step B: Fetch messages for this verified chat
-        const msgRes = await api.get(`/messages/${chatId}`);
-        if (isCancelled) return;
-
-        const fetchedMessages = msgRes.data.data.messages;
-        setMessages(chatId, fetchedMessages);
-        if (fetchedMessages.length < 30) {
-          useChatStore.getState().setHasMoreMessages(chatId, false);
-        } else {
-          useChatStore.getState().setHasMoreMessages(chatId, true);
-        }
-      } catch (err: any) {
-        if (isCancelled) return;
-        console.error("Chat verification error:", err);
-        
-        if (err.response?.status === 401) {
-          useAuthStore.getState().logout();
-          window.location.replace(`/login?redirect=${encodeURIComponent(window.location.pathname)}`);
-        } else if (err.response?.status === 403 || err.response?.status === 404) {
-          setAccessDenied(true);
-          toast.error("You are not authorized to access this conversation.");
-          router.replace("/chats");
-        }
-      } finally {
-        if (!isCancelled) setLoading(false);
-      }
-    };
-
-    void verifyAndLoadChat();
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [chatId, upsertChat, setMessages, router]);
-
-  // 3. Mark messages as read when chat is opened or new messages load in
-  useEffect(() => {
-    if (!socket || !isConnected || !user?.id || messages.length === 0) return;
-
-    const unreadMessages = messages.filter(
-      (m) =>
-        m.senderId !== user.id &&
-        !m.id.startsWith("temp-") &&
-        !m.receipts?.some((r: any) => r.userId === user.id && r.readAt)
-    );
-
-    if (unreadMessages.length > 0) {
-      socket.emit("message:read", {
-        messageIds: unreadMessages.map((m) => m.id),
-        chatId,
-      });
-    }
-  }, [chatId, messages, user?.id, socket, isConnected]);
-
-  const sendMyMessage = useCallback(async (
-    content: string,
-    type: string,
-    replyToId?: string | null,
-    attachments?: any[]
-  ) => {
-    const tempId = `temp-${Date.now()}`;
-    const tempMsg: any = {
-      id: tempId,
-      chatId,
-      senderId: user?.id || "",
-      type,
-      content,
-      createdAt: new Date().toISOString(),
-      sender: {
-        id: user?.id || "",
-        name: user?.name || "Me",
-        username: user?.username || "me",
-        avatarUrl: user?.avatarUrl || null,
-      },
-      attachments: attachments || [],
-      isSending: true,
-      receipts: [],
-    };
-
-    addMessage(chatId, tempMsg);
-
-    try {
-      const res = await api.post(`/messages/${chatId}`, {
-        content,
-        type,
-        attachments,
-      });
-
-      const message = res.data.data.message;
-      useChatStore.getState().resolveOptimisticMessage(chatId, tempId, message);
-    } catch (err) {
-      console.error("Error sending message:", err);
-      useChatStore.getState().failOptimisticMessage(chatId, tempId);
-    }
-  }, [chatId, addMessage, user]);
-
-  const handleRetryMessage = useCallback(async (msg: any) => {
-    const tempId = msg.id;
-    useChatStore.getState().retryOptimisticMessage(chatId, tempId);
-
-    try {
-      const res = await api.post(`/messages/${chatId}`, {
-        content: msg.content,
-        type: msg.type,
-        attachments: msg.attachments || [],
-      });
-      const message = res.data.data.message;
-      useChatStore.getState().resolveOptimisticMessage(chatId, tempId, message);
-    } catch (err) {
-      console.error("Error retrying message:", err);
-      useChatStore.getState().failOptimisticMessage(chatId, tempId);
-    }
   }, [chatId]);
 
-  const loadOlderMessages = useCallback(async () => {
-    if (loadingMore || messages.length === 0) return;
-    const hasMore = useChatStore.getState().hasMoreMessages[chatId] !== false;
-    if (!hasMore) return;
+  // If the chat disappears (deleted, or you were removed) leave the page.
+  useEffect(() => {
+    if (hasLoaded.current && !chatExists) router.replace("/chats");
+  }, [chatExists, router]);
 
-    const oldestId = messages[0].id;
-    if (oldestId.startsWith("temp-")) return;
+  // ── socket room ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!socket || !isConnected) return;
+    socket.emit("chat:join", { chatId });
+    return () => { socket.emit("chat:leave", { chatId }); };
+  }, [socket, isConnected, chatId]);
+
+  // ── load chat details + latest messages (again after a reconnect) ───────────
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        await refreshChat(chatId);
+        if (cancelled) return;
+        hasLoaded.current = true;
+        await loadLatestMessages(chatId);
+      } catch (err: any) {
+        if (cancelled) return;
+        const status = err.response?.status;
+        if (status === 403 || status === 404) {
+          toast.error("That conversation isn't available.");
+          router.replace("/chats");
+        } else if (status !== 401) {
+          toast.error(apiErrorMessage(err, "Couldn't load this conversation."));
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [chatId, reconnectCount, router]);
+
+  // ── read receipts ───────────────────────────────────────────────────────────
+  // IDs already reported, so the same messages aren't re-sent every time the list changes.
+  const reportedRead = useRef(new Set<string>());
+
+  const reportRead = useCallback(() => {
+    if (!socket || !isConnected || !user?.id || document.visibilityState !== "visible") return;
+
+    const unread = useChatStore.getState().messages[chatId]?.filter(
+      (m) =>
+        m.senderId !== user.id &&
+        m.type !== "SYSTEM" &&
+        !m.id.startsWith("temp-") &&
+        !reportedRead.current.has(m.id) &&
+        !m.receipts?.some((r) => r.userId === user.id && r.readAt)
+    ) ?? [];
+
+    if (unread.length > 0) {
+      unread.forEach((m) => reportedRead.current.add(m.id));
+      socket.emit("message:read", { chatId, messageIds: unread.map((m) => m.id) });
+    }
+    useChatStore.getState().setUnread(chatId, 0);
+  }, [socket, isConnected, user?.id, chatId]);
+
+  useEffect(() => { reportRead(); }, [reportRead, messages]);
+
+  useEffect(() => {
+    document.addEventListener("visibilitychange", reportRead);
+    return () => document.removeEventListener("visibilitychange", reportRead);
+  }, [reportRead]);
+
+  // A reconnect may have dropped acknowledgements; allow re-reporting.
+  useEffect(() => { reportedRead.current.clear(); }, [reconnectCount]);
+
+  // ── sending ─────────────────────────────────────────────────────────────────
+  const post = async (tempId: string, content: string, type: string, attachments: OutgoingAttachment[]) => {
+    try {
+      const res = await api.post(`/messages/${chatId}`, { content, type, attachments });
+      useChatStore.getState().resolveOptimisticMessage(chatId, tempId, res.data.data.message);
+    } catch (err) {
+      useChatStore.getState().failOptimisticMessage(chatId, tempId);
+      toast.error(apiErrorMessage(err, "Message not sent."));
+    }
+  };
+
+  const sendMyMessage = useCallback(
+    async (content: string, type: string, attachments: OutgoingAttachment[] = []) => {
+      const tempId = `temp-${crypto.randomUUID()}`;
+      useChatStore.getState().addMessage(chatId, {
+        id: tempId,
+        chatId,
+        senderId: user?.id ?? "",
+        type: type as any,
+        content,
+        createdAt: new Date().toISOString(),
+        sender: { id: user?.id ?? "", name: user?.name ?? "Me", username: user?.username ?? "", avatarUrl: user?.avatarUrl ?? null },
+        attachments: attachments.map((a, i) => ({ ...a, id: `${tempId}-${i}`, messageId: tempId, thumbUrl: null, createdAt: new Date().toISOString() })),
+        isSending: true,
+        receipts: [],
+      });
+      await post(tempId, content, type, attachments);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chatId, user]
+  );
+
+  const retryMessage = useCallback(async (msg: any) => {
+    useChatStore.getState().retryOptimisticMessage(chatId, msg.id);
+    await post(msg.id, msg.content, msg.type, (msg.attachments ?? []).map(({ fileName, fileType, fileSize, fileUrl, mimeType }: any) => ({ fileName, fileType, fileSize, fileUrl, mimeType })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId]);
+
+  const loadOlder = useCallback(async () => {
+    if (loadingMore) return;
+    const state = useChatStore.getState();
+    if (state.hasMoreMessages[chatId] === false) return;
+
+    const thread = state.messages[chatId] ?? [];
+    const oldest = thread.find((m) => !m.id.startsWith("temp-"));
+    if (!oldest) return;
 
     setLoadingMore(true);
     try {
-      const res = await api.get(`/messages/${chatId}?cursor=${oldestId}&limit=30`);
-      const oldMessages = res.data.data.messages;
-      if (oldMessages.length < 30) {
-        useChatStore.getState().setHasMoreMessages(chatId, false);
-      } else {
-        useChatStore.getState().setHasMoreMessages(chatId, true);
-      }
-      useChatStore.getState().prependMessages(chatId, oldMessages);
+      const res = await api.get(`/messages/${chatId}`, { params: { cursor: oldest.id, limit: PAGE_SIZE } });
+      const older = res.data.data.messages;
+      useChatStore.getState().setHasMoreMessages(chatId, older.length >= PAGE_SIZE);
+      useChatStore.getState().prependMessages(chatId, older);
     } catch (err) {
-      console.error("Failed to load older messages:", err);
+      toast.error(apiErrorMessage(err, "Couldn't load earlier messages."));
     } finally {
       setLoadingMore(false);
     }
-  }, [chatId, messages, loadingMore]);
+  }, [chatId, loadingMore]);
 
-  if (accessDenied) {
-    return (
-      <div className="chat-canvas flex-1 flex flex-col items-center justify-center h-full text-zinc-500 gap-3 p-6 select-none">
-        <p className="text-base font-bold text-zinc-900 dark:text-zinc-100">Access Denied</p>
-        <p className="text-xs text-zinc-500">You are not authorized to view this chat.</p>
-      </div>
-    );
-  }
+  // ── in-chat search ──────────────────────────────────────────────────────────
+  const matches = useMemo(() => {
+    const q = searchQuery.trim().toLocaleLowerCase();
+    if (!q) return [];
+    return messages.filter((m) => {
+      if (m.type === "SYSTEM" || m.deletedForEveryoneAt) return false;
+      const names = (m.attachments ?? []).map((a: any) => a.fileName ?? "").join(" ");
+      return `${m.content ?? ""} ${names}`.toLocaleLowerCase().includes(q);
+    });
+  }, [messages, searchQuery]);
+
+  useEffect(() => setActiveMatch(Math.max(0, matches.length - 1)), [searchQuery, matches.length]);
+
+  const navigateSearch = (direction: "up" | "down") => {
+    if (matches.length === 0) return;
+    setActiveMatch((i) => (direction === "down" ? (i + 1) % matches.length : (i - 1 + matches.length) % matches.length));
+  };
 
   return (
-    <div className="chat-canvas flex-1 flex h-full min-w-0 text-zinc-900 dark:text-zinc-100 relative overflow-hidden">
-      <div className="flex-1 flex flex-col h-full min-w-0 relative z-10 border-r border-zinc-200/70 dark:border-zinc-800 bg-transparent">
-        
+    <div className="chat-canvas relative flex min-h-0 flex-1 overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col">
         <ChatHeader
           chatId={chatId}
-          onToggleProfile={() => setShowProfilePanel(!showProfilePanel)}
-          isProfileOpen={showProfilePanel}
+          onToggleProfile={() => setShowInfo((v) => !v)}
+          isProfileOpen={showInfo}
           isSearchOpen={isSearchOpen}
           setIsSearchOpen={setIsSearchOpen}
           searchQuery={searchQuery}
           setSearchQuery={setSearchQuery}
-          searchMatchCount={searchMatches.length}
-          activeSearchMatch={activeSearchMatch}
+          searchMatchCount={matches.length}
+          activeSearchMatch={activeMatch}
           onSearchNavigate={navigateSearch}
         />
 
         <MessageList
           chatId={chatId}
           messages={messages}
-          searchQuery={searchQuery}
-          searchTargetId={searchMatches[activeSearchMatch]?.id}
-          onLoadMore={loadOlderMessages}
+          searchQuery={isSearchOpen ? searchQuery : ""}
+          searchTargetId={isSearchOpen ? matches[activeMatch]?.id : undefined}
+          onLoadMore={loadOlder}
           loadingMore={loadingMore}
           isLoading={loading}
-          onRetry={handleRetryMessage}
+          onRetry={retryMessage}
+          onForward={setForwarding}
         />
 
-        {/* Input Bar */}
-        <MessageInput
-          chatId={chatId}
-          onSendMessage={sendMyMessage}
-        />
+        <MessageInput chatId={chatId} onSendMessage={sendMyMessage} />
       </div>
 
-      {showProfilePanel && (
-        <div className="absolute inset-0 sm:relative sm:w-80 flex-shrink-0 h-full border-l border-zinc-200 dark:border-zinc-800 z-30 shadow-md bg-white dark:bg-zinc-900">
-          <ProfilePanel
-            chatId={chatId}
-            onClose={() => setShowProfilePanel(false)}
-          />
+      {showInfo && (
+        <div className="absolute inset-0 z-30 border-l border-line bg-surface lg:static lg:inset-auto lg:w-[22rem] lg:shrink-0">
+          <ProfilePanel chatId={chatId} onClose={() => setShowInfo(false)} />
         </div>
       )}
+
+      {forwarding && <ForwardMessageModal message={forwarding} onClose={() => setForwarding(null)} />}
     </div>
   );
 }

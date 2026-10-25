@@ -1,523 +1,335 @@
 "use client";
 
 import * as React from "react";
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { X, Image, FileText, Download, Plus, Trash2, Edit2, Check, Loader2, LogOut, Search, Play } from "lucide-react";
+import { Check, Download, FileText, Loader2, LogOut, Pencil, Play, Plus, Trash2, UserMinus, X } from "lucide-react";
+import { toast } from "sonner";
 import { Avatar } from "@components/ui/Avatar";
-import { Button } from "@components/ui/Button";
+import { Button, IconButton } from "@components/ui/Button";
+import { ConfirmDialog } from "@components/ui/Dialog";
+import { MediaLightbox } from "@components/chat/MediaLightbox";
 import { useChatStore } from "@hooks/useChatStore";
 import { useAuthStore } from "@hooks/useAuthStore";
-import api, { API_BASE_URL } from "@lib/api";
+import api, { apiErrorMessage } from "@lib/api";
+import { downloadFile } from "@lib/download";
+import { getChatDisplay } from "@lib/chatHelpers";
+import { formatBytes } from "@lib/format";
+import { cn } from "@lib/utils";
 
-const EMPTY_MESSAGES: any[] = [];
+const NO_MESSAGES: any[] = [];
 
-interface ProfilePanelProps {
-  onClose: () => void;
-  chatId: string;
-}
+type Tab = "members" | "media" | "files";
+type Confirm = null | { kind: "leave" | "delete" } | { kind: "remove"; userId: string; name: string };
 
-export function ProfilePanel({ onClose, chatId }: ProfilePanelProps) {
+export function ProfilePanel({ onClose, chatId }: { onClose: () => void; chatId: string }) {
   const router = useRouter();
-  const user = useAuthStore((state) => state.user);
-  const chats = useChatStore((state) => state.chats);
-  const messages = useChatStore((state) => state.messages[chatId] ?? EMPTY_MESSAGES);
-  const onlineStatuses = useChatStore((state) => state.onlineStatuses);
+  const myId = useAuthStore((s) => s.user?.id);
+  const chat = useChatStore((s) => s.chats.find((c) => c.id === chatId));
+  const messages = useChatStore((s) => s.messages[chatId] ?? NO_MESSAGES);
+  const onlineStatuses = useChatStore((s) => s.onlineStatuses);
 
-  // Find target chat
-  const chat = chats.find((c) => c.id === chatId);
+  const isGroup = chat?.type === "GROUP";
+  const isOwner = chat?.createdBy === myId;
 
-  // Tabs: members (groups only), media, files
-  const [activeTab, setActiveTab] = useState<"members" | "media" | "files">(
-    chat?.type === "GROUP" ? "members" : "media"
-  );
-
-  // Group editing state
-  const [isEditingTitle, setIsEditingTitle] = useState(false);
-  const [newTitle, setNewTitle] = useState("");
+  const [tab, setTab] = useState<Tab>(isGroup ? "members" : "media");
+  const [editing, setEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [memberQuery, setMemberQuery] = useState("");
+  const [memberResults, setMemberResults] = useState<any[]>([]);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<Confirm>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [viewer, setViewer] = useState<{ url: string; type: "IMAGE" | "VIDEO" | "PDF"; name: string } | null>(null);
 
-  // Group member adding state
-  const [showAddMember, setShowAddMember] = useState(false);
-  const [memberSearchQuery, setMemberSearchQuery] = useState("");
-  const [memberSearchResults, setMemberSearchResults] = useState<any[]>([]);
-  const [searchingMembers, setSearchingMembers] = useState(false);
-  const [actionInProgress, setActionInProgress] = useState<string | null>(null);
+  const attachments = useMemo(() => messages.flatMap((m: any) => (m.deletedForEveryoneAt ? [] : m.attachments ?? [])), [messages]);
+  const media = attachments.filter((a: any) => ["IMAGE", "VIDEO"].includes(a.fileType) || /^(image|video)\//.test(a.mimeType ?? ""));
+  const files = attachments.filter((a: any) => !media.includes(a) && a.fileType !== "AUDIO" && !(a.mimeType ?? "").startsWith("audio/"));
 
-  // Resolve partner details for DMs
-  const getPartner = () => {
-    if (chat?.type === "DIRECT" && user) {
-      const partner = chat.members?.find((m: any) => m.userId !== user.id)?.user;
-      return {
-        name: partner?.name || "User",
-        username: partner?.username || "user",
-        avatarUrl: partner?.avatarUrl,
-        bio: (partner as any)?.bio || "Hey there! I am using QuickConnect.",
-        id: partner?.id || "",
-        email: partner?.email || null,
-      };
-    }
-    return {
-      name: chat?.title || "Group Chat",
-      username: `group-${chatId.slice(0, 6)}`,
-      avatarUrl: chat?.photoUrl || "/logo.png",
-      bio: "Group Chat with multiple participants",
-      id: "",
-      email: null,
-    };
-  };
-
-  const partner = getPartner();
-  const isOnline = chat?.type === "DIRECT" && onlineStatuses[partner.id] === "online";
-
-  // Gather all attachments from messages in this chat
-  const allAttachments = messages.flatMap((m: any) => m.attachments || []);
-  const mediaFiles = allAttachments.filter(
-    (att: any) =>
-      att.fileType === "IMAGE" ||
-      att.fileType === "VIDEO" ||
-      att.mimeType?.startsWith("image/") ||
-      att.mimeType?.startsWith("video/")
-  );
-  const documentFiles = allAttachments.filter(
-    (att: any) =>
-      att.fileType === "DOCUMENT" ||
-      att.fileType === "FILE" ||
-      (!att.mimeType?.startsWith("image/") &&
-        !att.mimeType?.startsWith("video/") &&
-        !att.mimeType?.startsWith("audio/"))
-  );
-
-  // Member search effect with debounce
+  const memberIds = chat?.members.map((m) => m.userId).join(",") ?? "";
   useEffect(() => {
-    if (!memberSearchQuery.trim() || memberSearchQuery.length < 2) {
-      setMemberSearchResults([]);
-      return;
-    }
-
-    const delayDebounce = setTimeout(async () => {
-      setSearchingMembers(true);
+    const q = memberQuery.trim();
+    if (!adding || q.length < 2) { setMemberResults([]); return; }
+    let stale = false;
+    const timer = setTimeout(async () => {
       try {
-        const res = await api.get(`/users/search?q=${encodeURIComponent(memberSearchQuery)}`);
-        const users = res.data.data.users || [];
-        const existingMemberIds = new Set(chat?.members.map((m: any) => m.userId));
-        setMemberSearchResults(users.filter((u: any) => !existingMemberIds.has(u.id)));
-      } catch (err) {
-        console.error("Failed to search users:", err);
-      } finally {
-        setSearchingMembers(false);
+        const res = await api.get("/users/search", { params: { q } });
+        const existing = new Set(memberIds.split(","));
+        if (!stale) setMemberResults((res.data.data.users as any[]).filter((u) => !existing.has(u.id)));
+      } catch {
+        if (!stale) setMemberResults([]);
       }
-    }, 400);
-
-    return () => clearTimeout(delayDebounce);
-  }, [memberSearchQuery, chat?.members]);
+    }, 300);
+    return () => { stale = true; clearTimeout(timer); };
+  }, [memberQuery, adding, memberIds]);
 
   if (!chat) return null;
 
-  const handleDownload = (url: string, filename: string) => {
-    const downloadUrl = `${API_BASE_URL}/media/download?url=${encodeURIComponent(url)}&name=${encodeURIComponent(filename)}`;
-    window.location.href = downloadUrl;
-  };
+  const display = getChatDisplay(chat, myId);
+  const partner = display.partner;
+  const online = !isGroup && partner && onlineStatuses[partner.id] === "online";
 
-  const isGroupManager = chat.createdBy === user?.id;
-
-  const canRemoveMember = (member: any) => {
-    if (member.userId === user?.id) return false;
-    return chat.createdBy === user?.id;
-  };
-
-  // Group Info Edit
-  const handleSaveTitle = async () => {
-    if (!newTitle.trim() || newTitle === chat.title) {
-      setIsEditingTitle(false);
-      return;
-    }
+  const saveTitle = async () => {
+    const title = draftTitle.trim();
+    if (!title || title === chat.title) return setEditing(false);
     setSavingTitle(true);
     try {
-      await api.patch(`/chats/${chat.id}`, { title: newTitle });
-      useChatStore.getState().updateChat(chat.id, { title: newTitle });
-      setIsEditingTitle(false);
+      await api.patch(`/chats/${chat.id}`, { title });
+      useChatStore.getState().updateChat(chat.id, { title });
+      setEditing(false);
     } catch (err) {
-      console.error("Failed to save title:", err);
-      alert("Failed to update group name.");
+      toast.error(apiErrorMessage(err, "Couldn't rename the group."));
     } finally {
       setSavingTitle(false);
     }
   };
 
-  // Member management actions
-  const handleAddMember = async (targetUser: any) => {
-    setActionInProgress(targetUser.id);
+  const addMember = async (user: any) => {
+    setBusyId(user.id);
     try {
-      await api.post(`/chats/${chat.id}/members`, { userId: targetUser.id });
-      const newMemberObj = {
-        id: `temp-${Date.now()}`,
-        userId: targetUser.id,
-        chatId: chat.id,
-        createdAt: new Date().toISOString(),
-        joinedAt: new Date().toISOString(),
-        user: targetUser,
-      };
-      useChatStore.getState().updateChat(chat.id, {
-        members: [...chat.members, newMemberObj],
-      });
-      setMemberSearchQuery("");
-      setMemberSearchResults([]);
+      await api.post(`/chats/${chat.id}/members`, { userId: user.id });
+      setMemberQuery("");
+      setMemberResults([]);
+      // The server announces the change and the chat refreshes itself via chat:updated.
     } catch (err) {
-      console.error("Failed to add member:", err);
-      alert("Could not add user to the group.");
+      toast.error(apiErrorMessage(err, "Couldn't add that person."));
     } finally {
-      setActionInProgress(null);
+      setBusyId(null);
     }
   };
 
-  const handleRemoveMember = async (targetUserId: string) => {
-    setActionInProgress(targetUserId);
+  const runConfirmed = async () => {
+    if (!confirm) return;
+    setConfirming(true);
     try {
-      await api.delete(`/chats/${chat.id}/members/${targetUserId}`);
-      useChatStore.getState().updateChat(chat.id, {
-        members: chat.members.filter((m) => m.userId !== targetUserId),
-      });
+      if (confirm.kind === "remove") {
+        await api.delete(`/chats/${chat.id}/members/${confirm.userId}`);
+      } else if (confirm.kind === "leave") {
+        await api.delete(`/chats/${chat.id}/members/${myId}`);
+        useChatStore.getState().deleteChat(chat.id);
+        onClose();
+        router.push("/chats");
+      } else {
+        await api.delete(`/chats/${chat.id}`);
+        useChatStore.getState().deleteChat(chat.id);
+        onClose();
+        router.push("/chats");
+      }
+      setConfirm(null);
     } catch (err) {
-      console.error("Failed to remove member:", err);
-      alert("Could not remove member from the group.");
+      toast.error(apiErrorMessage(err, "That didn't work. Please try again."));
     } finally {
-      setActionInProgress(null);
+      setConfirming(false);
     }
   };
 
-  const handleLeaveGroup = async () => {
-    if (!confirm("Are you sure you want to leave this group?")) return;
-    try {
-      await api.delete(`/chats/${chat.id}/leave`);
-      useChatStore.getState().deleteChat(chat.id);
-      onClose();
-      router.push("/chats");
-    } catch (err) {
-      console.error("Failed to leave group:", err);
-      alert("Failed to leave group.");
-    }
-  };
+  const confirmCopy = {
+    leave: { title: "Leave this group?", description: "You'll stop receiving its messages. Someone else can add you back.", label: "Leave group" },
+    delete: {
+      title: isGroup ? "Delete this group?" : "Delete this conversation?",
+      description: isGroup
+        ? "The group and all its messages are removed for every member. This can't be undone."
+        : `The conversation and all its messages are removed for both you and ${display.name}. This can't be undone.`,
+      label: "Delete",
+    },
+    remove: { title: `Remove ${confirm?.kind === "remove" ? confirm.name : ""}?`, description: "They'll no longer see new messages in this group.", label: "Remove" },
+  } as const;
+
+  const tabs: [Tab, string][] = [
+    ...(isGroup ? ([["members", `Members · ${chat.members.length}`]] as [Tab, string][]) : []),
+    ["media", `Media · ${media.length}`],
+    ["files", `Files · ${files.length}`],
+  ];
 
   return (
-    <div className="w-full flex flex-col h-full bg-white dark:bg-zinc-900 border-l border-zinc-200 dark:border-zinc-800 select-none text-zinc-900 dark:text-zinc-100 relative z-20 overflow-hidden">
-      {/* Header */}
-      <div className="p-3.5 flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
-        <h3 className="text-sm sm:text-base font-bold text-zinc-900 dark:text-zinc-100">Contact Details</h3>
-        <button
-          onClick={onClose}
-          className="p-1.5 rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white transition-colors cursor-pointer"
-        >
-          <X size={18} />
-        </button>
+    <aside className="flex h-full w-full flex-col bg-surface" aria-label="Conversation details">
+      <div className="flex h-16 shrink-0 items-center justify-between border-b border-line pl-4 pr-2">
+        <h2 className="font-semibold">{isGroup ? "Group info" : "Contact info"}</h2>
+        <IconButton label="Close details" onClick={onClose}><X size={18} /></IconButton>
       </div>
 
-      {/* Profile Info */}
-      <div className="p-4 flex flex-col items-center text-center border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
-        <Avatar
-          src={partner.avatarUrl}
-          name={partner.name}
-          size="xl"
-          showStatus={chat.type === "DIRECT"}
-          isOnline={isOnline}
-          className="mb-2 shadow-md h-20 w-20 text-3xl"
-        />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="flex flex-col items-center border-b border-line px-5 pb-6 pt-7 text-center">
+          <Avatar src={display.avatarUrl} name={display.name} size="xl" isGroup={isGroup} showStatus={!isGroup} isOnline={Boolean(online)} />
 
-        {isEditingTitle ? (
-          <div className="flex items-center gap-1.5 mt-1 w-full max-w-xs">
-            <input
-              type="text"
-              value={newTitle}
-              onChange={(e) => setNewTitle(e.target.value)}
-              className="flex-1 px-2.5 py-1.5 rounded-lg border border-sky-500 bg-white dark:bg-zinc-800 text-sm text-zinc-900 dark:text-zinc-100 focus:outline-none"
-              autoFocus
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleSaveTitle();
-                else if (e.key === "Escape") setIsEditingTitle(false);
-              }}
-            />
+          {editing ? (
+            <div className="mt-4 flex w-full max-w-xs items-center gap-1.5">
+              <input
+                value={draftTitle}
+                onChange={(e) => setDraftTitle(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") void saveTitle(); if (e.key === "Escape") setEditing(false); }}
+                maxLength={80}
+                autoFocus
+                aria-label="Group name"
+                className="h-9 min-w-0 flex-1 rounded-md border border-accent bg-paper px-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/25"
+              />
+              <IconButton label="Save name" onClick={() => void saveTitle()} disabled={savingTitle}>
+                {savingTitle ? <Loader2 size={16} className="animate-spin" /> : <Check size={17} />}
+              </IconButton>
+            </div>
+          ) : (
+            <div className="mt-4 flex max-w-full items-center gap-1">
+              <h3 className="truncate font-display text-2xl">{display.name}</h3>
+              {isGroup && isOwner && (
+                <IconButton label="Rename group" onClick={() => { setDraftTitle(chat.title ?? ""); setEditing(true); }} className="h-8 w-8">
+                  <Pencil size={14} />
+                </IconButton>
+              )}
+            </div>
+          )}
+
+          <p className="mt-1 text-sm text-muted">{isGroup ? `${chat.members.length} members` : `@${partner?.username ?? "unknown"}`}</p>
+          {!isGroup && partner?.bio && <p className="mt-3 max-w-xs text-[15px] italic text-muted">“{partner.bio}”</p>}
+        </div>
+
+        <div className="flex border-b border-line px-2" role="tablist">
+          {tabs.map(([id, label]) => (
             <button
-              onClick={handleSaveTitle}
-              disabled={savingTitle}
-              className="p-1.5 bg-sky-500 text-white rounded-lg hover:bg-sky-600 cursor-pointer disabled:opacity-50"
+              key={id}
+              role="tab"
+              aria-selected={tab === id}
+              onClick={() => setTab(id)}
+              className={cn("-mb-px border-b-2 px-3 py-3 text-sm font-medium", tab === id ? "border-accent text-ink" : "border-transparent text-muted hover:text-ink")}
             >
-              {savingTitle ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+              {label}
             </button>
-          </div>
-        ) : (
-          <div className="flex items-center gap-1.5 max-w-full">
-            <h4 className="text-base sm:text-lg font-bold truncate text-zinc-900 dark:text-zinc-100">{partner.name}</h4>
-            {chat.type === "GROUP" && isGroupManager && (
-              <button
-                onClick={() => {
-                  setNewTitle(chat.title || "");
-                  setIsEditingTitle(true);
-                }}
-                className="p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors cursor-pointer"
-                title="Edit Group Subject"
-              >
-                <Edit2 size={13} />
-              </button>
-            )}
-          </div>
-        )}
+          ))}
+        </div>
 
-        <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mt-0.5">
-          {chat.type === "DIRECT" ? `@${partner.username}` : `${chat.members.length} participants`}
-        </p>
-        <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-2 px-2 italic line-clamp-2 leading-relaxed">
-          "{partner.bio}"
-        </p>
-
-        {chat.type === "DIRECT" && partner.email && (
-          <div className="w-full mt-3 space-y-1">
-            <div className="w-full flex flex-col items-start gap-0.5 px-3 py-2 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/40 text-left">
-              <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-400">Email Address</span>
-              <span className="text-xs font-semibold truncate w-full text-zinc-800 dark:text-zinc-200 select-all">{partner.email}</span>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Media / Files / Members Tabs */}
-      <div className="flex border-b border-zinc-200 dark:border-zinc-800 text-xs font-semibold overflow-x-auto no-scrollbar bg-white dark:bg-zinc-900">
-        {chat.type === "GROUP" && (
-          <button
-            onClick={() => setActiveTab("members")}
-            className={`px-3.5 py-2.5 text-center border-b-2 flex-shrink-0 cursor-pointer transition-colors ${
-              activeTab === "members"
-                ? "border-sky-500 text-sky-600 dark:text-sky-400 font-bold"
-                : "border-transparent text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-            }`}
-          >
-            Members ({chat.members.length})
-          </button>
-        )}
-        <button
-          onClick={() => setActiveTab("media")}
-          className={`px-3.5 py-2.5 text-center border-b-2 flex-shrink-0 cursor-pointer transition-colors ${
-            activeTab === "media"
-              ? "border-sky-500 text-sky-600 dark:text-sky-400 font-bold"
-              : "border-transparent text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          }`}
-        >
-          Media ({mediaFiles.length})
-        </button>
-        <button
-          onClick={() => setActiveTab("files")}
-          className={`px-3.5 py-2.5 text-center border-b-2 flex-shrink-0 cursor-pointer transition-colors ${
-            activeTab === "files"
-              ? "border-sky-500 text-sky-600 dark:text-sky-400 font-bold"
-              : "border-transparent text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          }`}
-        >
-          Files ({documentFiles.length})
-        </button>
-      </div>
-
-      {/* Tabs Content */}
-      <div className="flex-1 overflow-y-auto p-3.5 scrollbar-thin">
-        {/* Members Tab */}
-        {activeTab === "members" && chat.type === "GROUP" && (
-          <div className="space-y-3">
-            {/* Add member section */}
-            {isGroupManager && (
-              <div>
-                {!showAddMember ? (
-                  <button
-                    onClick={() => setShowAddMember(true)}
-                    className="flex items-center gap-1.5 text-xs font-bold text-sky-600 dark:text-sky-400 hover:underline cursor-pointer"
-                  >
-                    <Plus size={14} className="stroke-[2.5px]" /> Add Member
-                  </button>
-                ) : (
-                  <div className="space-y-2 border border-zinc-200 dark:border-zinc-800 p-2 rounded-xl bg-zinc-50 dark:bg-zinc-800/40">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-bold text-zinc-400 uppercase">Search User</span>
-                      <button
-                        onClick={() => {
-                          setShowAddMember(false);
-                          setMemberSearchQuery("");
-                        }}
-                        className="text-xs font-bold text-red-500 hover:underline cursor-pointer"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                    <div className="relative">
-                      <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" />
+        <div className="p-4">
+          {tab === "members" && isGroup && (
+            <div className="space-y-3">
+              {isOwner && (
+                adding ? (
+                  <div className="space-y-2 rounded-md border border-line bg-paper p-2.5">
+                    <div className="flex items-center gap-2">
                       <input
-                        type="text"
-                        value={memberSearchQuery}
-                        onChange={(e) => setMemberSearchQuery(e.target.value)}
-                        placeholder="Search username"
-                        className="w-full pl-8 pr-2 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs focus:outline-none focus:border-sky-500"
+                        value={memberQuery}
+                        onChange={(e) => setMemberQuery(e.target.value)}
+                        placeholder="Search by name or username"
+                        aria-label="Search people to add"
+                        autoFocus
+                        className="h-9 min-w-0 flex-1 rounded-md border border-line bg-surface px-3 text-sm focus:border-accent focus:outline-none"
                       />
+                      <Button size="sm" variant="ghost" onClick={() => { setAdding(false); setMemberQuery(""); }}>Done</Button>
                     </div>
-
-                    {/* Member Add Search Results */}
-                    {searchingMembers ? (
-                      <div className="flex justify-center py-2"><Loader2 size={14} className="animate-spin text-sky-500" /></div>
-                    ) : memberSearchQuery.trim().length >= 2 && memberSearchResults.length === 0 ? (
-                      <p className="text-xs text-zinc-400 py-1 text-center">No users found</p>
-                    ) : (
-                      <div className="max-h-36 overflow-y-auto space-y-1 pr-1 scrollbar-thin">
-                        {memberSearchResults.map((u) => (
-                          <div
-                            key={u.id}
-                            onClick={() => handleAddMember(u)}
-                            className="flex items-center justify-between p-1.5 hover:bg-white dark:hover:bg-zinc-800 rounded-lg cursor-pointer transition-colors"
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <Avatar src={u.avatarUrl} name={u.name} size="xs" />
-                              <span className="text-xs font-semibold truncate text-zinc-800 dark:text-zinc-200">{u.name}</span>
-                            </div>
-                            <button
-                              disabled={actionInProgress === u.id}
-                              className="p-1 rounded bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-55"
-                            >
-                              {actionInProgress === u.id ? <Loader2 size={10} className="animate-spin" /> : <Plus size={10} />}
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                    {memberResults.map((u) => (
+                      <button key={u.id} type="button" onClick={() => void addMember(u)} disabled={busyId === u.id} className="flex w-full items-center gap-2.5 rounded p-1.5 text-left hover:bg-sunken disabled:opacity-60">
+                        <Avatar src={u.avatarUrl} name={u.name} size="sm" />
+                        <span className="min-w-0 flex-1 truncate text-sm">{u.name}</span>
+                        {busyId === u.id ? <Loader2 size={15} className="animate-spin" /> : <Plus size={16} className="text-accent" />}
+                      </button>
+                    ))}
                   </div>
-                )}
-              </div>
-            )}
+                ) : (
+                  <Button variant="secondary" size="sm" onClick={() => setAdding(true)}><Plus size={15} /> Add member</Button>
+                )
+              )}
 
-            {/* Members List */}
-            <div className="space-y-2">
-              {chat.members.map((member) => {
-                const isMe = member.userId === user?.id;
-                const canBeRemoved = canRemoveMember(member);
-                const memberRole = member.userId === chat.createdBy ? "OWNER" : "MEMBER";
+              <ul className="divide-y divide-line/70">
+                {chat.members.map((m) => (
+                  <li key={m.id} className="flex items-center gap-3 py-2.5">
+                    <Avatar src={m.user.avatarUrl} name={m.user.name} size="sm" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium">{m.userId === myId ? "You" : m.user.name}</span>
+                      <span className="block truncate text-xs text-muted">@{m.user.username}</span>
+                    </span>
+                    {m.userId === chat.createdBy && <span className="rounded bg-accent-soft px-1.5 py-0.5 text-xs font-medium text-accent-strong">Owner</span>}
+                    {isOwner && m.userId !== myId && (
+                      <IconButton label={`Remove ${m.user.name}`} tone="danger" className="h-8 w-8" onClick={() => setConfirm({ kind: "remove", userId: m.userId, name: m.user.name })}>
+                        <UserMinus size={15} />
+                      </IconButton>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
-                return (
-                  <div key={member.id} className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Avatar src={member.user.avatarUrl} name={member.user.name} size="sm" />
-                      <div className="min-w-0">
-                        <p className="text-xs sm:text-sm font-semibold truncate text-zinc-900 dark:text-zinc-100">
-                          {isMe ? "You" : member.user.name}
-                        </p>
-                        <p className="text-[11px] text-zinc-400 truncate">@{member.user.username}</p>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1 flex-shrink-0">
-                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wider ${
-                        memberRole === "OWNER"
-                          ? "bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20"
-                          : "bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400"
-                      }`}>
-                        {memberRole}
-                      </span>
-                      {canBeRemoved && (
-                        <button
-                          onClick={() => handleRemoveMember(member.userId)}
-                          disabled={actionInProgress === member.userId}
-                          className="p-1 rounded-lg text-zinc-400 hover:text-red-500 hover:bg-red-500/10 transition-all cursor-pointer disabled:opacity-50"
-                          title="Remove from group"
-                        >
-                          {actionInProgress === member.userId ? (
-                            <Loader2 size={12} className="animate-spin" />
-                          ) : (
-                            <Trash2 size={12} />
-                          )}
-                        </button>
+          {tab === "media" && (
+            media.length === 0 ? (
+              <p className="py-10 text-center text-sm text-muted">No photos or videos shared yet.</p>
+            ) : (
+              <div className="grid grid-cols-3 gap-1.5">
+                {media.map((a: any, i: number) => {
+                  const video = a.fileType === "VIDEO" || (a.mimeType ?? "").startsWith("video/");
+                  return (
+                    <button
+                      key={a.id ?? i}
+                      type="button"
+                      onClick={() => setViewer({ url: a.fileUrl, type: video ? "VIDEO" : "IMAGE", name: a.fileName })}
+                      aria-label={`Open ${a.fileName}`}
+                      className="relative aspect-square overflow-hidden rounded bg-sunken"
+                    >
+                      {video ? (
+                        <video src={a.fileUrl} preload="metadata" muted playsInline className="pointer-events-none h-full w-full object-cover" />
+                      ) : (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={a.fileUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
                       )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                      {video && (
+                        <span className="absolute inset-0 flex items-center justify-center bg-black/25 text-white"><Play size={18} fill="currentColor" /></span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )
+          )}
 
-            {/* Leave Group Action */}
-            <div className="pt-2 border-t border-zinc-200 dark:border-zinc-800">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={handleLeaveGroup}
-                className="w-full border-red-500/20 hover:border-red-500/40 text-red-500 hover:bg-red-500/10 flex items-center justify-center gap-1.5 font-semibold text-xs"
-              >
-                <LogOut size={13} /> Leave Group
-              </Button>
-            </div>
-          </div>
-        )}
+          {tab === "files" && (
+            files.length === 0 ? (
+              <p className="py-10 text-center text-sm text-muted">No files shared yet.</p>
+            ) : (
+              <ul className="space-y-1.5">
+                {files.map((a: any, i: number) => (
+                  <li key={a.id ?? i}>
+                    <button type="button" onClick={() => void downloadFile(a.fileUrl, a.fileName)} className="flex w-full items-center gap-3 rounded-md border border-line p-2.5 text-left hover:bg-sunken">
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded bg-ink text-paper"><FileText size={16} /></span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium">{a.fileName}</span>
+                        <span className="text-xs text-muted">{formatBytes(a.fileSize)}</span>
+                      </span>
+                      <Download size={15} className="shrink-0 text-muted" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )
+          )}
+          <p className="mt-4 text-xs text-faint">Shared items come from messages loaded in this chat.</p>
+        </div>
 
-        {/* Media Tab */}
-        {activeTab === "media" && (
-          mediaFiles.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-36 text-zinc-400 dark:text-zinc-500">
-              <Image size={24} className="mb-1.5 opacity-40" />
-              <span className="text-xs font-medium">No media shared</span>
-            </div>
-          ) : (
-            <div className="grid grid-cols-3 gap-1.5">
-              {mediaFiles.map((att) => {
-                const isVid = att.mimeType?.startsWith("video/") || att.fileType === "VIDEO";
-                return (
-                  <div
-                    key={att.id}
-                    onClick={() => handleDownload(att.fileUrl, att.fileName)}
-                    className="aspect-square rounded-lg overflow-hidden border border-zinc-200 dark:border-zinc-800 bg-zinc-100 dark:bg-zinc-950 relative group cursor-pointer hover:border-sky-500 transition-colors"
-                  >
-                    {isVid ? (
-                      <video src={att.fileUrl} className="h-full w-full object-cover pointer-events-none" />
-                    ) : (
-                      <img src={att.fileUrl} alt="media" className="h-full w-full object-cover" />
-                    )}
-                    {isVid && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/20">
-                        <span className="p-1 rounded-full bg-black/60 text-white shadow-sm flex items-center justify-center">
-                          <Play size={10} fill="currentColor" className="ml-0.5" />
-                        </span>
-                      </div>
-                    )}
-                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity z-10">
-                      <Download size={14} className="text-white" />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )
-        )}
-
-        {/* Files Tab */}
-        {activeTab === "files" && (
-          documentFiles.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-36 text-zinc-400 dark:text-zinc-500">
-              <FileText size={24} className="mb-1.5 opacity-40" />
-              <span className="text-xs font-medium">No documents shared</span>
-            </div>
-          ) : (
-            <div className="space-y-1.5">
-              {documentFiles.map((att) => (
-                <div
-                  key={att.id}
-                  onClick={() => handleDownload(att.fileUrl, att.fileName)}
-                  className="flex items-center gap-2.5 p-2 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/40 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                >
-                  <div className="flex items-center justify-center h-7 w-7 rounded-lg bg-zinc-200 dark:bg-zinc-700 text-sky-600 dark:text-sky-400 flex-shrink-0">
-                    <FileText size={14} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-semibold truncate text-zinc-900 dark:text-zinc-100">{att.fileName}</p>
-                    <p className="text-[11px] text-zinc-400">
-                      {(att.fileSize / 1024).toFixed(1)} KB
-                    </p>
-                  </div>
-                  <Download size={13} className="text-zinc-400 hover:text-zinc-900 dark:hover:text-white flex-shrink-0" />
-                </div>
-              ))}
-            </div>
-          )
-        )}
+        <div className="space-y-2 border-t border-line p-4">
+          {isGroup && (
+            <Button variant="secondary" className="w-full justify-start text-danger" onClick={() => setConfirm({ kind: "leave" })}>
+              <LogOut size={16} /> Leave group
+            </Button>
+          )}
+          {(!isGroup || isOwner) && (
+            <Button variant="secondary" className="w-full justify-start text-danger" onClick={() => setConfirm({ kind: "delete" })}>
+              <Trash2 size={16} /> {isGroup ? "Delete group" : "Delete conversation"}
+            </Button>
+          )}
+        </div>
       </div>
-    </div>
+
+      {confirm && (
+        <ConfirmDialog
+          open
+          onOpenChange={(open) => !open && !confirming && setConfirm(null)}
+          title={confirmCopy[confirm.kind].title}
+          description={confirmCopy[confirm.kind].description}
+          confirmLabel={confirmCopy[confirm.kind].label}
+          destructive
+          loading={confirming}
+          onConfirm={runConfirmed}
+        />
+      )}
+
+      {viewer && <MediaLightbox isOpen onClose={() => setViewer(null)} mediaUrl={viewer.url} mediaType={viewer.type} fileName={viewer.name} />}
+    </aside>
   );
 }

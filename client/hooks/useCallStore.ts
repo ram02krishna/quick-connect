@@ -1,8 +1,9 @@
 import { create } from "zustand";
+import { toast } from "sonner";
 import { useSocketStore } from "./useSocketStore";
 import { useAuthStore } from "./useAuthStore";
 import { useChatStore } from "./useChatStore";
-import { toast } from "sonner";
+import { getAudioContext } from "@lib/sound";
 
 interface CallPartner {
   id: string;
@@ -11,18 +12,19 @@ interface CallPartner {
 }
 
 export type CallState = "idle" | "incoming" | "outgoing" | "connected";
+type CallKind = "audio" | "video";
 
 interface CallStoreState {
   callState: CallState;
-  callType: "audio" | "video";
+  callType: CallKind;
   isGroupCall: boolean;
 
-  // 1-to-1 specifics
+  // 1-to-1
   partner: CallPartner | null;
   remoteStream: MediaStream | null;
   peerConnection: RTCPeerConnection | null;
 
-  // Group Call specifics
+  // group (mesh)
   groupChatId: string | null;
   groupChatTitle: string | null;
   peerConnections: Record<string, RTCPeerConnection>;
@@ -33,646 +35,576 @@ interface CallStoreState {
   isMuted: boolean;
   isCameraOff: boolean;
   isScreenSharing: boolean;
+  isMinimized: boolean;
+  /** Ringtone loudness (0–1). */
+  ringVolume: number;
+  /** Loudness of the other person's voice (0–1). Independent from the ringtone. */
+  callVolume: number;
 
-  // Actions
-  initiateCall: (targetUserId: string, targetName: string, targetAvatar: string | null, type: "audio" | "video") => Promise<void>;
-  receiveCall: (payload: { fromUserId: string; fromUserName: string; fromUserAvatar: string | null; sdp: any; callType: "audio" | "video" }) => void;
+  initiateCall: (targetUserId: string, targetName: string, targetAvatar: string | null, type: CallKind) => Promise<void>;
+  receiveCall: (payload: { fromUserId: string; fromUserName: string; fromUserAvatar: string | null; sdp: RTCSessionDescriptionInit; callType: CallKind }) => void;
   acceptCall: () => Promise<void>;
   declineCall: () => void;
   endCall: () => void;
+  handleAnswer: (fromUserId: string, sdp: RTCSessionDescriptionInit) => void;
+  handlePeerDeclined: (fromUserId: string, reason?: string) => void;
+  handlePeerEnded: (fromUserId: string) => void;
+  handlePeerUnavailable: (targetUserId: string) => void;
 
-  // Group Call Actions
-  initiateGroupCall: (chatId: string, chatTitle: string, type: "audio" | "video") => Promise<void>;
-  receiveGroupCall: (payload: { chatId: string; chatTitle: string; chatAvatar: string | null; fromUserId: string; fromUserName: string; fromUserAvatar: string | null; callType: "audio" | "video" }) => void;
+  initiateGroupCall: (chatId: string, chatTitle: string, type: CallKind) => Promise<void>;
+  receiveGroupCall: (payload: { chatId: string; chatTitle: string; chatAvatar: string | null; fromUserId: string; fromUserName: string; fromUserAvatar: string | null; callType: CallKind }) => void;
   acceptGroupCall: () => Promise<void>;
   respondToGroupCall: (status: "accepted" | "declined") => void;
-  handleParticipantJoined: (userId: string) => Promise<void>;
-  handleParticipantLeft: (userId: string) => void;
-  handleGroupOffer: (fromUserId: string, sdp: any, callType: "audio" | "video") => Promise<void>;
-  handleGroupAnswer: (fromUserId: string, sdp: any) => Promise<void>;
+  handleParticipantJoined: (chatId: string, userId: string) => Promise<void>;
+  handleParticipantLeft: (chatId: string, userId: string) => void;
+  handleGroupOffer: (fromUserId: string, sdp: RTCSessionDescriptionInit, callType: CallKind) => Promise<void>;
+  handleGroupAnswer: (fromUserId: string, sdp: RTCSessionDescriptionInit) => Promise<void>;
+  handleGroupEnded: (chatId: string) => void;
 
   toggleMute: () => void;
   toggleCamera: () => void;
   toggleScreenShare: () => Promise<void>;
-  handleIceCandidate: (candidate: any, fromUserId?: string) => void;
-  handleAnswer: (sdp: any) => void;
+  handleIceCandidate: (candidate: RTCIceCandidateInit, fromUserId?: string) => void;
   resetCallStore: () => void;
-  ringVolume: number;
   setRingVolume: (volume: number) => void;
-  isMinimized: boolean;
+  setCallVolume: (volume: number) => void;
   setIsMinimized: (isMinimized: boolean) => void;
 }
 
-// Ringtone
-let audioCtx: AudioContext | null = null;
-let ringGain: GainNode | null = null;
-let ringInterval: any = null;
+// ─── ringtone ────────────────────────────────────────────────────────────────
 
-// Scales normalized 0..1 volume to a gentle, comfortable acoustic gain curve.
-function computeComfortGain(vol: number): number {
-  const clamped = Math.max(0, Math.min(1, vol));
-  return Math.pow(clamped, 1.2) * 0.25;
+let ringGain: GainNode | null = null;
+let ringInterval: ReturnType<typeof setInterval> | null = null;
+
+const comfortGain = (vol: number) => Math.pow(Math.max(0, Math.min(1, vol)), 1.2) * 0.25;
+
+function readStoredVolume(key: string, fallback: number) {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const parsed = parseFloat(localStorage.getItem(key) ?? "");
+    if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1) return Math.round(parsed * 100) / 100;
+  } catch { /* storage unavailable */ }
+  return fallback;
 }
 
-const getInitialRingVolume = (): number => {
-  if (typeof window === "undefined") return 0.3; // default to a comfortable 30%
-  try {
-    const saved = localStorage.getItem("quickconnect_call_ring_volume");
-    if (saved !== null) {
-      const parsed = parseFloat(saved);
-      if (!isNaN(parsed) && parsed >= 0 && parsed <= 1) return Math.round(parsed * 100) / 100;
-    }
-  } catch { }
-  return 0.3;
-};
-
 function startRingtone(type: "dial" | "ring") {
-  if (typeof window === "undefined") return;
-  try {
-    if (!audioCtx) {
-      audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-    }
-    if (audioCtx.state === "suspended") {
-      void audioCtx.resume();
-    }
-    stopRingtone();
-    ringGain = audioCtx.createGain();
-    const volume = useCallStore.getState().ringVolume;
-    const targetGain = computeComfortGain(volume);
-    ringGain.gain.setValueAtTime(targetGain, audioCtx.currentTime);
-    ringGain.gain.value = targetGain;
-    ringGain.connect(audioCtx.destination);
+  stopRingtone();
+  const audio = getAudioContext();
+  if (!audio) return;
 
-    const playBeep = () => {
-      if (!audioCtx || !ringGain) return;
-      const now = audioCtx.currentTime;
-      if (type === "dial") {
-        const osc1 = audioCtx.createOscillator();
-        const osc2 = audioCtx.createOscillator();
-        osc1.frequency.setValueAtTime(440, now);
-        osc2.frequency.setValueAtTime(480, now);
-        osc1.connect(ringGain);
-        osc2.connect(ringGain);
-        osc1.start(now); osc2.start(now);
-        osc1.stop(now + 1.5); osc2.stop(now + 1.5);
-      } else {
-        const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6
-        notes.forEach((freq, i) => {
-          const osc = audioCtx!.createOscillator();
-          osc.type = "sine";
-          osc.frequency.setValueAtTime(freq, now + i * 0.15);
-          osc.connect(ringGain!);
-          osc.start(now + i * 0.15);
-          osc.stop(now + i * 0.15 + 0.3);
-        });
+  ringGain = audio.createGain();
+  ringGain.gain.value = comfortGain(useCallStore.getState().ringVolume);
+  ringGain.connect(audio.destination);
+
+  const beep = () => {
+    if (!ringGain) return;
+    const now = audio.currentTime;
+    if (type === "dial") {
+      for (const freq of [440, 480]) {
+        const osc = audio.createOscillator();
+        osc.frequency.setValueAtTime(freq, now);
+        osc.connect(ringGain);
+        osc.start(now);
+        osc.stop(now + 1.5);
       }
-    };
+    } else {
+      [523.25, 659.25, 783.99, 1046.5].forEach((freq, i) => {
+        const osc = audio.createOscillator();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq, now + i * 0.15);
+        osc.connect(ringGain!);
+        osc.start(now + i * 0.15);
+        osc.stop(now + i * 0.15 + 0.3);
+      });
+    }
+  };
 
-    playBeep();
-    ringInterval = setInterval(playBeep, type === "dial" ? 4000 : 2500);
-  } catch (err) {
-    console.error("Failed to start ringtone:", err);
-  }
+  beep();
+  ringInterval = setInterval(beep, type === "dial" ? 4000 : 2500);
 }
 
 function stopRingtone() {
-  if (ringInterval) { clearInterval(ringInterval); ringInterval = null; }
-  try { ringGain?.disconnect(); } catch { }
+  if (ringInterval) clearInterval(ringInterval);
+  ringInterval = null;
+  try { ringGain?.disconnect(); } catch { /* already disconnected */ }
   ringGain = null;
 }
 
-// ─── WebRTC config ────────────────────────────────────────────────────────────
+// ─── WebRTC ──────────────────────────────────────────────────────────────────
 
-const STUN_SERVERS: RTCConfiguration = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:global.stun.twilio.com:3478" },
-    { urls: "stun:stun.cloudflare.com:3478" },
-  ],
-  bundlePolicy: "max-bundle",
-  rtcpMuxPolicy: "require",
-};
+const RING_TIMEOUT_MS = 45_000;
 
-// Media helper with graceful device fallback 
-// Returns a MediaStream. If the camera is missing, falls back to audio-only.
-// If the mic is missing, throws a user-friendly error.
-async function getMediaStream(type: "audio" | "video"): Promise<{ stream: MediaStream; actualType: "audio" | "video" }> {
-  const audioConstraints: MediaTrackConstraints = {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
-  };
+function buildRtcConfig(): RTCConfiguration {
+  const iceServers: RTCIceServer[] = [
+    { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302", "stun:stun.cloudflare.com:3478"] },
+  ];
+  // STUN alone can't connect people behind symmetric NATs (common on mobile data).
+  // Provide a TURN relay through NEXT_PUBLIC_TURN_* to make those calls work.
+  const turnUrl = process.env.NEXT_PUBLIC_TURN_URL;
+  if (turnUrl) {
+    iceServers.push({
+      urls: turnUrl.split(",").map((u) => u.trim()),
+      username: process.env.NEXT_PUBLIC_TURN_USERNAME,
+      credential: process.env.NEXT_PUBLIC_TURN_CREDENTIAL,
+    });
+  }
+  return { iceServers, bundlePolicy: "max-bundle", rtcpMuxPolicy: "require" };
+}
 
-  const videoConstraints: MediaTrackConstraints = {
-    width: { ideal: 1280 },
-    height: { ideal: 720 },
-    frameRate: { ideal: 30 },
-    facingMode: "user",
-  };
+async function getMediaStream(type: CallKind): Promise<{ stream: MediaStream; actualType: CallKind }> {
+  const audio: MediaTrackConstraints = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  const video: MediaTrackConstraints = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 }, facingMode: "user" };
+  const md = navigator.mediaDevices;
+  if (!md?.getUserMedia) throw new Error("Calls need a secure (https) connection and a supported browser.");
 
-  if (type === "video") {
-    // Try full video + audio first
+  const audioOnly = async () => ({ stream: await md.getUserMedia({ audio, video: false }), actualType: "audio" as CallKind });
+
+  if (type === "audio") {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: audioConstraints,
-        video: videoConstraints,
-      });
-      return { stream, actualType: "video" };
+      return await audioOnly();
     } catch (err: any) {
-      const isDeviceMissing =
-        err.name === "NotFoundError" ||
-        err.name === "DevicesNotFoundError" ||
-        err.name === "OverconstrainedError";
-
-      if (isDeviceMissing) {
-        // Try with relaxed video constraints before giving up on video
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: audioConstraints,
-            video: true, // minimal constraints
-          });
-          toast.warning("Using lower quality camera — your device doesn't support HD.");
-          return { stream, actualType: "video" };
-        } catch {
-          // Camera truly unavailable — fall back to audio-only
-          toast.warning("Camera not found. Switching to audio-only call.");
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: audioConstraints,
-            video: false,
-          });
-          return { stream, actualType: "audio" };
-        }
-      }
-
-      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-        throw new Error("Camera or microphone permission denied. Please allow access in your browser settings.");
-      }
-      if (err.name === "NotReadableError" || err.name === "TrackStartError") {
-        // Device is in use — try audio only as fallback
-        toast.warning("Camera is in use by another app. Switching to audio-only call.");
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
-        return { stream, actualType: "audio" };
-      }
-      throw err;
-    }
-  } else {
-    // Audio-only call
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: audioConstraints,
-        video: false,
-      });
-      return { stream, actualType: "audio" };
-    } catch (err: any) {
-      if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
-        throw new Error("No microphone found. Please connect a microphone and try again.");
-      }
-      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-        throw new Error("Microphone permission denied. Please allow access in your browser settings.");
-      }
-      if (err.name === "NotReadableError" || err.name === "TrackStartError") {
-        throw new Error("Microphone is in use by another app. Please close that app and try again.");
-      }
+      if (err.name === "NotFoundError") throw new Error("No microphone found. Connect one and try again.");
+      if (err.name === "NotAllowedError") throw new Error("Microphone permission denied. Allow access in your browser settings.");
+      if (err.name === "NotReadableError") throw new Error("Your microphone is being used by another app.");
       throw err;
     }
   }
+
+  try {
+    return { stream: await md.getUserMedia({ audio, video }), actualType: "video" };
+  } catch (err: any) {
+    if (err.name === "NotAllowedError") {
+      throw new Error("Camera or microphone permission denied. Allow access in your browser settings.");
+    }
+    if (err.name === "OverconstrainedError") {
+      try {
+        return { stream: await md.getUserMedia({ audio, video: true }), actualType: "video" };
+      } catch { /* fall through to audio only */ }
+    }
+    if (["NotFoundError", "OverconstrainedError", "NotReadableError"].includes(err.name)) {
+      toast.warning("Camera unavailable — continuing as a voice call.");
+      return audioOnly();
+    }
+    throw err;
+  }
 }
 
-// Store
+const emit = (event: string, payload?: unknown) => useSocketStore.getState().socket?.emit(event, payload);
+
 export const useCallStore = create<CallStoreState>((set, get) => {
-  // Module-level ephemeral state (not in Zustand to avoid serialization)
+  // Not kept in Zustand state: these never drive rendering.
   let pendingCandidates: RTCIceCandidateInit[] = [];
   let pendingGroupCandidates: Record<string, RTCIceCandidateInit[]> = {};
   let pendingOffer: RTCSessionDescriptionInit | null = null;
+  let ringTimer: ReturnType<typeof setTimeout> | null = null;
+  // Incremented on every reset; async steps compare it to notice the call was cancelled meanwhile.
+  let session = 0;
 
-  const cleanMedia = () => {
+  const clearRingTimer = () => {
+    if (ringTimer) clearTimeout(ringTimer);
+    ringTimer = null;
+  };
+
+  const armRingTimer = (onTimeout: () => void) => {
+    clearRingTimer();
+    ringTimer = setTimeout(onTimeout, RING_TIMEOUT_MS);
+  };
+
+  const closeEverything = () => {
     const { localStream, remoteStream, peerConnection, peerConnections, remoteStreams } = get();
-    if (localStream) localStream.getTracks().forEach((t) => t.stop());
-    if (remoteStream) remoteStream.getTracks().forEach((t) => t.stop());
-    if (peerConnection) { try { peerConnection.close(); } catch { } }
-    Object.values(peerConnections).forEach((pc) => { try { pc.close(); } catch { } });
+    localStream?.getTracks().forEach((t) => t.stop());
+    remoteStream?.getTracks().forEach((t) => t.stop());
     Object.values(remoteStreams).forEach((s) => s.getTracks().forEach((t) => t.stop()));
+    try { peerConnection?.close(); } catch { /* ignore */ }
+    Object.values(peerConnections).forEach((pc) => { try { pc.close(); } catch { /* ignore */ } });
     stopRingtone();
+    clearRingTimer();
     pendingCandidates = [];
     pendingGroupCandidates = {};
     pendingOffer = null;
   };
 
-  // Helper: drain ICE candidates into a peer connection once remote description is set
-  const drainCandidates = (pc: RTCPeerConnection, candidates: RTCIceCandidateInit[]) => {
-    candidates.forEach((c) => {
-      void pc.addIceCandidate(new RTCIceCandidate(c)).catch((err) => {
-        console.warn("Failed to add ICE candidate:", err);
-      });
-    });
+  const addCandidates = (pc: RTCPeerConnection, list: RTCIceCandidateInit[]) => {
+    list.forEach((c) => void pc.addIceCandidate(new RTCIceCandidate(c)).catch((err) => console.warn("ICE candidate rejected:", err)));
   };
 
-  const createGroupPeerConnection = (userId: string, _isInitiator: boolean) => {
-    const pc = new RTCPeerConnection(STUN_SERVERS);
+  const participantInfo = (chatId: string | null, userId: string): CallPartner => {
+    const chat = chatId ? useChatStore.getState().chats.find((c) => c.id === chatId) : null;
+    const member = chat?.members?.find((m) => m.userId === userId);
+    return { id: userId, name: member?.user?.name || "Participant", avatarUrl: member?.user?.avatarUrl || null };
+  };
+
+  const createGroupPeer = (userId: string) => {
+    const pc = new RTCPeerConnection(buildRtcConfig());
     const { localStream } = get();
+    localStream?.getTracks().forEach((track) => pc.addTrack(track, localStream));
 
-    if (localStream) {
-      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-    }
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        useSocketStore.getState().socket?.emit("call:ice-candidate", {
-          targetUserId: userId,
-          candidate: event.candidate,
-          fromUserId: useAuthStore.getState().user?.id,
-        });
-      }
+    pc.onicecandidate = (e) => {
+      if (e.candidate) emit("call:ice-candidate", { targetUserId: userId, candidate: e.candidate });
     };
-
-    pc.ontrack = (event) => {
-      if (event.streams?.[0]) {
-        set((state) => ({ remoteStreams: { ...state.remoteStreams, [userId]: event.streams[0] } }));
-      }
+    pc.ontrack = (e) => {
+      if (e.streams?.[0]) set((s) => ({ remoteStreams: { ...s.remoteStreams, [userId]: e.streams[0] } }));
     };
-
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === "failed") {
-        console.warn(`Group peer connection to ${userId} failed.`);
-      }
+      if (pc.connectionState === "failed") toast.error(`Lost connection with ${get().participants[userId]?.name ?? "a participant"}.`);
     };
 
-    set((state) => ({ peerConnections: { ...state.peerConnections, [userId]: pc } }));
+    set((s) => ({ peerConnections: { ...s.peerConnections, [userId]: pc } }));
     return pc;
   };
 
-  return {
-    callState: "idle",
-    callType: "audio",
+  const blankCall = {
+    callState: "idle" as CallState,
     isGroupCall: false,
     partner: null,
-    remoteStream: null,
     peerConnection: null,
+    localStream: null,
+    remoteStream: null,
     groupChatId: null,
     groupChatTitle: null,
     peerConnections: {},
     remoteStreams: {},
     participants: {},
-    localStream: null,
     isMuted: false,
     isCameraOff: false,
     isScreenSharing: false,
-    ringVolume: getInitialRingVolume(),
     isMinimized: false,
+  };
+
+  return {
+    ...blankCall,
+    callType: "audio",
+    ringVolume: readStoredVolume("quickconnect_call_ring_volume", 0.3),
+    callVolume: readStoredVolume("quickconnect_call_volume", 1),
+
     setIsMinimized: (isMinimized) => set({ isMinimized }),
 
     setRingVolume: (volume) => {
-      const clamped = Math.max(0, Math.min(1, Math.round(volume * 100) / 100));
-      set({ ringVolume: clamped });
-      try {
-        if (typeof window !== "undefined") {
-          localStorage.setItem("quickconnect_call_ring_volume", clamped.toString());
-        }
-      } catch { }
-      if (ringGain && audioCtx) {
-        try {
-          const targetGain = computeComfortGain(clamped);
-          ringGain.gain.cancelScheduledValues(audioCtx.currentTime);
-          ringGain.gain.setValueAtTime(targetGain, audioCtx.currentTime);
-          ringGain.gain.value = targetGain;
-        } catch { }
-      }
+      const v = Math.max(0, Math.min(1, Math.round(volume * 100) / 100));
+      set({ ringVolume: v });
+      try { localStorage.setItem("quickconnect_call_ring_volume", String(v)); } catch { /* ignore */ }
+      if (ringGain) ringGain.gain.value = comfortGain(v);
     },
 
-    // 1-to-1: Calle
+    setCallVolume: (volume) => {
+      const v = Math.max(0, Math.min(1, Math.round(volume * 100) / 100));
+      set({ callVolume: v });
+      try { localStorage.setItem("quickconnect_call_volume", String(v)); } catch { /* ignore */ }
+    },
+
+    // ── 1:1: caller ──────────────────────────────────────────────────────────
 
     initiateCall: async (targetUserId, targetName, targetAvatar, type) => {
-      cleanMedia();
+      if (get().callState !== "idle") return;
+      if (!useSocketStore.getState().isConnected) {
+        toast.error("You're offline. Reconnect to place a call.");
+        return;
+      }
+
+      const mine = ++session;
       set({
-        callState: "outgoing", callType: type, isGroupCall: false,
+        ...blankCall, callState: "outgoing", callType: type,
         partner: { id: targetUserId, name: targetName, avatarUrl: targetAvatar },
-        isMuted: false, isCameraOff: false, isScreenSharing: false,
       });
       startRingtone("dial");
 
       try {
         const { stream, actualType } = await getMediaStream(type);
-        // If we fell back to audio, update the call type
-        if (actualType !== type) set({ callType: actualType });
-        set({ localStream: stream });
+        // Hung up while the permission prompt was open — release the devices and stop.
+        if (mine !== session) { stream.getTracks().forEach((t) => t.stop()); return; }
 
-        const pc = new RTCPeerConnection(STUN_SERVERS);
+        set({ callType: actualType, localStream: stream });
+
+        const pc = new RTCPeerConnection(buildRtcConfig());
         set({ peerConnection: pc });
-
         stream.getTracks().forEach((track) => pc.addTrack(track, stream));
 
-        pc.ontrack = (event) => {
-          if (event.streams?.[0]) set({ remoteStream: event.streams[0] });
-        };
+        // Candidates are held back until the offer has been sent, so the callee never sees them first.
+        let offerSent = false;
+        const held: RTCIceCandidate[] = [];
+        const sendCandidate = (c: RTCIceCandidate) => emit("call:ice-candidate", { targetUserId, candidate: c });
 
-        pc.onicecandidate = (event) => {
-          if (event.candidate) {
-            useSocketStore.getState().socket?.emit("call:ice-candidate", {
-              targetUserId, candidate: event.candidate,
-            });
-          }
+        pc.ontrack = (e) => { if (e.streams?.[0]) set({ remoteStream: e.streams[0] }); };
+        pc.onicecandidate = (e) => {
+          if (!e.candidate) return;
+          offerSent ? sendCandidate(e.candidate) : held.push(e.candidate);
         };
-
         pc.onconnectionstatechange = () => {
-          if (pc.connectionState === "failed") {
-            toast.error("Call connection failed. Please try again.");
+          if (pc.connectionState === "failed" && mine === session) {
+            toast.error("The call connection failed.");
             get().endCall();
           }
         };
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        if (mine !== session) return;
 
-        const socket = useSocketStore.getState().socket;
-        const user = useAuthStore.getState().user;
-        socket?.emit("call:initiate", {
-          targetUserId,
-          fromUserId: user?.id,
-          fromUserName: user?.name,
-          fromUserAvatar: user?.avatarUrl,
-          sdp: offer,
-          callType: actualType,
+        emit("call:initiate", { targetUserId, sdp: offer, callType: actualType });
+        offerSent = true;
+        held.splice(0).forEach(sendCandidate);
+
+        armRingTimer(() => {
+          if (mine !== session || get().callState !== "outgoing") return;
+          toast.info(`${targetName} didn't answer.`);
+          get().endCall();
         });
       } catch (err: any) {
+        if (mine !== session) return;
         console.error("Call initiation error:", err);
-        toast.error(err.message || "Failed to access camera or microphone.");
+        toast.error(err.message || "Couldn't start the call.");
         get().resetCallStore();
       }
     },
 
-    //  1-to-1: Receiver 
+    // ── 1:1: callee ──────────────────────────────────────────────────────────
 
     receiveCall: (payload) => {
-      cleanMedia();
-      // Store the offer for use in acceptCall — DO NOT call setRemoteDescription here.
-      // Tracks must be added to the peer connection BEFORE setRemoteDescription
-      // so the answer SDP properly negotiates media.
+      // Already busy: tell the caller instead of overwriting the call in progress.
+      if (get().callState !== "idle") {
+        emit("call:decline", { targetUserId: payload.fromUserId, reason: "busy" });
+        return;
+      }
+
+      const mine = ++session;
       pendingOffer = payload.sdp;
+      pendingCandidates = [];
 
       set({
-        callState: "incoming", callType: payload.callType, isGroupCall: false,
+        ...blankCall, callState: "incoming", callType: payload.callType,
         partner: { id: payload.fromUserId, name: payload.fromUserName, avatarUrl: payload.fromUserAvatar },
-        isMuted: false, isCameraOff: false, isScreenSharing: false,
       });
       startRingtone("ring");
 
-      const pc = new RTCPeerConnection(STUN_SERVERS);
+      const pc = new RTCPeerConnection(buildRtcConfig());
       set({ peerConnection: pc });
 
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          useSocketStore.getState().socket?.emit("call:ice-candidate", {
-            targetUserId: payload.fromUserId, candidate: event.candidate,
-          });
-        }
+      pc.onicecandidate = (e) => {
+        if (e.candidate) emit("call:ice-candidate", { targetUserId: payload.fromUserId, candidate: e.candidate });
       };
-
-      pc.ontrack = (event) => {
-        if (event.streams?.[0]) set({ remoteStream: event.streams[0] });
-      };
-
+      pc.ontrack = (e) => { if (e.streams?.[0]) set({ remoteStream: e.streams[0] }); };
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "failed") {
-          toast.error("Call connection failed.");
-          get().resetCallStore();
+        if (pc.connectionState === "failed" && mine === session) {
+          toast.error("The call connection failed.");
+          get().endCall();
         }
       };
+
+      armRingTimer(() => {
+        if (mine !== session || get().callState !== "incoming") return;
+        get().declineCall();
+      });
     },
 
     acceptCall: async () => {
       const { peerConnection, partner, callType } = get();
       if (!peerConnection || !partner) return;
+      const mine = session;
       stopRingtone();
-      set({ callState: "connected" });
+      clearRingTimer();
 
       try {
         const { stream, actualType } = await getMediaStream(callType);
-        if (actualType !== callType) set({ callType: actualType });
-        set({ localStream: stream });
+        if (mine !== session) { stream.getTracks().forEach((t) => t.stop()); return; }
 
-        // 1. Add local tracks FIRST so the answer SDP includes our media
+        set({ callState: "connected", callType: actualType, localStream: stream });
+        // Local tracks first so the answer negotiates our media too.
         stream.getTracks().forEach((track) => peerConnection.addTrack(track, stream));
 
-        // 2. Now apply the stored offer
         if (pendingOffer) {
           await peerConnection.setRemoteDescription(new RTCSessionDescription(pendingOffer));
-          // 3. Drain any ICE candidates that arrived before remote description was set
-          drainCandidates(peerConnection, pendingCandidates);
+          addCandidates(peerConnection, pendingCandidates);
           pendingCandidates = [];
           pendingOffer = null;
         }
 
-        // 4. Create and send the answer
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
-        useSocketStore.getState().socket?.emit("call:accept", { targetUserId: partner.id, sdp: answer });
+        emit("call:accept", { targetUserId: partner.id, sdp: answer });
       } catch (err: any) {
+        if (mine !== session) return;
         console.error("Error accepting call:", err);
-        toast.error(err.message || "Failed to answer the call.");
+        toast.error(err.message || "Couldn't answer the call.");
         get().declineCall();
       }
     },
 
     declineCall: () => {
       const { partner, isGroupCall } = get();
-      if (isGroupCall) {
-        get().respondToGroupCall("declined");
-      } else if (partner) {
-        useSocketStore.getState().socket?.emit("call:decline", { targetUserId: partner.id });
-      }
+      if (isGroupCall) get().respondToGroupCall("declined");
+      else if (partner) emit("call:decline", { targetUserId: partner.id });
       get().resetCallStore();
     },
 
     endCall: () => {
       const { callState, partner, isGroupCall, groupChatId } = get();
-      const socket = useSocketStore.getState().socket;
       if (isGroupCall && groupChatId) {
-        socket?.emit(callState === "outgoing" ? "call:end-group" : "call:leave-group", { chatId: groupChatId });
+        // Before anyone has joined the starter cancels the ring for everyone; afterwards they just leave.
+        emit(callState === "outgoing" ? "call:end-group" : "call:leave-group", { chatId: groupChatId });
       } else if (partner) {
-        socket?.emit("call:hangup", { targetUserId: partner.id });
+        emit("call:hangup", { targetUserId: partner.id });
       }
       get().resetCallStore();
     },
 
-    //  1-to-1: Caller receives answer 
-
-    handleAnswer: (sdp) => {
-      const { peerConnection } = get();
-      if (!peerConnection) return;
+    handleAnswer: (fromUserId, sdp) => {
+      const { peerConnection, partner } = get();
+      if (!peerConnection || partner?.id !== fromUserId) return;
       stopRingtone();
+      clearRingTimer();
       set({ callState: "connected" });
-      void peerConnection.setRemoteDescription(new RTCSessionDescription(sdp))
-        .then(() => {
-          drainCandidates(peerConnection, pendingCandidates);
-          pendingCandidates = [];
-        })
-        .catch((err) => console.error("setRemoteDescription (answer) failed:", err));
+      peerConnection
+        .setRemoteDescription(new RTCSessionDescription(sdp))
+        .then(() => { addCandidates(peerConnection, pendingCandidates); pendingCandidates = []; })
+        .catch((err) => console.error("Applying the answer failed:", err));
     },
 
-    // Group Call: Initiator
+    handlePeerDeclined: (fromUserId, reason) => {
+      const { partner, callState } = get();
+      if (partner?.id !== fromUserId || callState === "idle") return;
+      get().resetCallStore();
+      toast.info(reason === "busy" ? `${partner.name} is on another call.` : `${partner.name} declined the call.`);
+    },
+
+    handlePeerEnded: (fromUserId) => {
+      const { partner, callState } = get();
+      if (partner?.id !== fromUserId || callState === "idle") return;
+      const wasConnected = callState === "connected";
+      get().resetCallStore();
+      toast.info(wasConnected ? "Call ended" : "Missed call");
+    },
+
+    handlePeerUnavailable: (targetUserId) => {
+      const { partner, callState } = get();
+      if (partner?.id !== targetUserId || callState !== "outgoing") return;
+      get().resetCallStore();
+      toast.info(`${partner.name} isn't online right now.`);
+    },
+
+    // ── group ────────────────────────────────────────────────────────────────
 
     initiateGroupCall: async (chatId, chatTitle, type) => {
-      cleanMedia();
-      set({
-        callState: "outgoing", callType: type, isGroupCall: true,
-        groupChatId: chatId, groupChatTitle: chatTitle,
-        isMuted: false, isCameraOff: false, isScreenSharing: false,
-        peerConnections: {}, remoteStreams: {}, participants: {},
-      });
+      if (get().callState !== "idle") return;
+      if (!useSocketStore.getState().isConnected) {
+        toast.error("You're offline. Reconnect to place a call.");
+        return;
+      }
+
+      const mine = ++session;
+      set({ ...blankCall, callState: "outgoing", callType: type, isGroupCall: true, groupChatId: chatId, groupChatTitle: chatTitle });
       startRingtone("dial");
 
       try {
         const { stream, actualType } = await getMediaStream(type);
-        if (actualType !== type) set({ callType: actualType });
-        set({ localStream: stream });
+        if (mine !== session) { stream.getTracks().forEach((t) => t.stop()); return; }
 
-        const socket = useSocketStore.getState().socket;
-        const user = useAuthStore.getState().user;
+        set({ callType: actualType, localStream: stream });
+        emit("call:initiate-group", { chatId, callType: actualType });
 
-        // Join the socket room BEFORE emitting the call so we receive
-        // call:participant-joined events from people who accept.
-        socket?.emit("chat:join", { chatId });
-
-        socket?.emit("call:initiate-group", {
-          chatId,
-          fromUserName: user?.name,
-          fromUserAvatar: user?.avatarUrl,
-          callType: actualType,
+        armRingTimer(() => {
+          if (mine !== session || get().callState !== "outgoing") return;
+          toast.info("Nobody joined the call.");
+          get().endCall();
         });
       } catch (err: any) {
-        console.error("Group call initiation error:", err);
-        toast.error(err.message || "Failed to access camera or microphone.");
+        if (mine !== session) return;
+        toast.error(err.message || "Couldn't start the call.");
         get().resetCallStore();
       }
     },
 
-    //  Group Call: Receiver 
-
     receiveGroupCall: (payload) => {
-      if (get().callState !== "idle") return; // already in a call
-      cleanMedia();
+      if (get().callState !== "idle") return;
+      const mine = ++session;
       set({
-        callState: "incoming", callType: payload.callType, isGroupCall: true,
+        ...blankCall, callState: "incoming", callType: payload.callType, isGroupCall: true,
         groupChatId: payload.chatId, groupChatTitle: payload.chatTitle,
-        participants: {
-          [payload.fromUserId]: { id: payload.fromUserId, name: payload.fromUserName, avatarUrl: payload.fromUserAvatar },
-        },
-        isMuted: false, isCameraOff: false, isScreenSharing: false,
+        participants: { [payload.fromUserId]: { id: payload.fromUserId, name: payload.fromUserName, avatarUrl: payload.fromUserAvatar } },
       });
       startRingtone("ring");
+      armRingTimer(() => {
+        if (mine === session && get().callState === "incoming") get().declineCall();
+      });
     },
 
     acceptGroupCall: async () => {
       const { groupChatId, callType } = get();
       if (!groupChatId) return;
+      const mine = session;
       stopRingtone();
-      set({ callState: "connected" });
+      clearRingTimer();
 
       try {
         const { stream, actualType } = await getMediaStream(callType);
-        if (actualType !== callType) set({ callType: actualType });
-        set({ localStream: stream });
+        if (mine !== session) { stream.getTracks().forEach((t) => t.stop()); return; }
 
-        const socket = useSocketStore.getState().socket;
-        // Join socket room so we get participant events
-        socket?.emit("chat:join", { chatId: groupChatId });
-        socket?.emit("call:join-group", { chatId: groupChatId });
+        set({ callState: "connected", callType: actualType, localStream: stream });
+        emit("call:join-group", { chatId: groupChatId });
         get().respondToGroupCall("accepted");
       } catch (err: any) {
-        console.error("Failed to accept group call:", err);
-        toast.error(err.message || "Failed to access camera or microphone.");
-        get().respondToGroupCall("declined");
-        get().resetCallStore();
+        if (mine !== session) return;
+        toast.error(err.message || "Couldn't join the call.");
+        get().declineCall();
       }
     },
 
     respondToGroupCall: (status) => {
       const { groupChatId } = get();
-      if (!groupChatId) return;
-      useSocketStore.getState().socket?.emit("call:group-response", { chatId: groupChatId, status });
+      if (groupChatId) emit("call:group-response", { chatId: groupChatId, status });
     },
 
-    // Group Call: Peer connection management 
-
-    handleParticipantJoined: async (userId) => {
+    handleParticipantJoined: async (chatId, userId) => {
       const { callState, isGroupCall, callType, groupChatId } = get();
-      if ((callState !== "connected" && callState !== "outgoing") || !isGroupCall) return;
+      if (!isGroupCall || groupChatId !== chatId || (callState !== "connected" && callState !== "outgoing")) return;
 
       if (callState === "outgoing") {
         set({ callState: "connected" });
         stopRingtone();
+        clearRingTimer();
       }
 
-      const chat = groupChatId ? useChatStore.getState().chats.find((c) => c.id === groupChatId) : null;
-      const member = chat?.members?.find((m: any) => m.userId === userId);
-      const participantInfo: CallPartner = {
-        id: userId,
-        name: member?.user?.name || "Participant",
-        avatarUrl: member?.user?.avatarUrl || null,
-      };
+      set((s) => ({ participants: { ...s.participants, [userId]: participantInfo(chatId, userId) } }));
 
-      set((state) => ({
-        participants: { ...state.participants, [userId]: participantInfo },
-      }));
-
-      const pc = createGroupPeerConnection(userId, true);
-
+      // Existing participants make the offer; the newcomer answers.
+      const pc = createGroupPeer(userId);
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        useSocketStore.getState().socket?.emit("call:offer", { targetUserId: userId, sdp: offer, callType });
+        emit("call:offer", { targetUserId: userId, sdp: offer, callType });
       } catch (err) {
-        console.error("Failed to create offer for participant:", err);
+        console.error("Couldn't offer to new participant:", err);
       }
     },
 
-    handleParticipantLeft: (userId) => {
-      const { peerConnections, remoteStreams, participants } = get();
-      try { peerConnections[userId]?.close(); } catch { }
-      const newPcs = { ...peerConnections };
-      const newStreams = { ...remoteStreams };
-      const newParticipants = { ...participants };
-      delete newPcs[userId];
-      delete newStreams[userId];
-      delete newParticipants[userId];
-      set({ peerConnections: newPcs, remoteStreams: newStreams, participants: newParticipants });
+    handleParticipantLeft: (chatId, userId) => {
+      const { groupChatId, peerConnections, remoteStreams, participants } = get();
+      if (groupChatId !== chatId) return;
+      try { peerConnections[userId]?.close(); } catch { /* ignore */ }
+      const { [userId]: _pc, ...pcs } = peerConnections;
+      const { [userId]: _stream, ...streams } = remoteStreams;
+      const { [userId]: _p, ...rest } = participants;
+      set({ peerConnections: pcs, remoteStreams: streams, participants: rest });
     },
 
-    handleGroupOffer: async (fromUserId, sdp, callType) => {
+    handleGroupOffer: async (fromUserId, sdp) => {
       const { callState, isGroupCall, groupChatId } = get();
-      if ((callState !== "connected" && callState !== "outgoing") || !isGroupCall) return;
-      if (callState === "outgoing") { set({ callState: "connected" }); stopRingtone(); }
+      if (!isGroupCall || (callState !== "connected" && callState !== "outgoing")) return;
+      if (callState === "outgoing") { set({ callState: "connected" }); stopRingtone(); clearRingTimer(); }
 
-      const chat = groupChatId ? useChatStore.getState().chats.find((c) => c.id === groupChatId) : null;
-      const member = chat?.members?.find((m: any) => m.userId === fromUserId);
-      const participantInfo: CallPartner = {
-        id: fromUserId,
-        name: member?.user?.name || "Participant",
-        avatarUrl: member?.user?.avatarUrl || null,
-      };
+      set((s) => ({ participants: { ...s.participants, [fromUserId]: participantInfo(groupChatId, fromUserId) } }));
 
-      set((state) => ({
-        participants: { ...state.participants, [fromUserId]: participantInfo },
-      }));
-
-      const pc = createGroupPeerConnection(fromUserId, false);
-
+      const pc = createGroupPeer(fromUserId);
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-
-        // Drain any pending candidates for this peer
         if (pendingGroupCandidates[fromUserId]) {
-          drainCandidates(pc, pendingGroupCandidates[fromUserId]);
+          addCandidates(pc, pendingGroupCandidates[fromUserId]);
           delete pendingGroupCandidates[fromUserId];
         }
-
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        useSocketStore.getState().socket?.emit("call:answer", { targetUserId: fromUserId, sdp: answer });
+        emit("call:answer", { targetUserId: fromUserId, sdp: answer });
       } catch (err) {
-        console.error("handleGroupOffer error:", err);
+        console.error("Couldn't answer group offer:", err);
       }
     },
 
@@ -682,37 +614,41 @@ export const useCallStore = create<CallStoreState>((set, get) => {
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(sdp));
         if (pendingGroupCandidates[fromUserId]) {
-          drainCandidates(pc, pendingGroupCandidates[fromUserId]);
+          addCandidates(pc, pendingGroupCandidates[fromUserId]);
           delete pendingGroupCandidates[fromUserId];
         }
       } catch (err) {
-        console.error("handleGroupAnswer error:", err);
+        console.error("Couldn't apply group answer:", err);
       }
     },
 
-    // ── ICE Candidates ────────────────────────────────────────────────────────
+    handleGroupEnded: (chatId) => {
+      const { isGroupCall, groupChatId, callState } = get();
+      if (!isGroupCall || groupChatId !== chatId || callState === "idle") return;
+      const wasConnected = callState === "connected";
+      get().resetCallStore();
+      toast.info(wasConnected ? "Group call ended" : "Missed group call");
+    },
+
+    // ── ICE ──────────────────────────────────────────────────────────────────
 
     handleIceCandidate: (candidate, fromUserId) => {
-      const { isGroupCall, peerConnections, peerConnection } = get();
+      const { isGroupCall, peerConnections, peerConnection, partner } = get();
 
-      if (isGroupCall && fromUserId) {
+      if (isGroupCall) {
+        if (!fromUserId) return;
         const pc = peerConnections[fromUserId];
-        if (pc?.remoteDescription) {
-          void pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.warn);
-        } else {
-          if (!pendingGroupCandidates[fromUserId]) pendingGroupCandidates[fromUserId] = [];
-          pendingGroupCandidates[fromUserId].push(candidate);
-        }
-      } else {
-        if (peerConnection?.remoteDescription) {
-          void peerConnection.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.warn);
-        } else {
-          pendingCandidates.push(candidate);
-        }
+        if (pc?.remoteDescription) void pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.warn);
+        else (pendingGroupCandidates[fromUserId] ??= []).push(candidate);
+        return;
       }
+
+      if (fromUserId && partner && fromUserId !== partner.id) return;
+      if (peerConnection?.remoteDescription) void peerConnection.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.warn);
+      else pendingCandidates.push(candidate);
     },
 
-    // Media controls 
+    // ── controls ─────────────────────────────────────────────────────────────
 
     toggleMute: () => {
       const { localStream, isMuted } = get();
@@ -721,76 +657,50 @@ export const useCallStore = create<CallStoreState>((set, get) => {
     },
 
     toggleCamera: () => {
-      const { localStream, isCameraOff, isScreenSharing, toggleScreenShare } = get();
-      if (isScreenSharing) {
-        void toggleScreenShare();
-      } else {
-        localStream?.getVideoTracks().forEach((t) => (t.enabled = isCameraOff));
-        set({ isCameraOff: !isCameraOff });
-      }
+      const { localStream, isCameraOff, isScreenSharing } = get();
+      if (isScreenSharing) { void get().toggleScreenShare(); return; }
+      localStream?.getVideoTracks().forEach((t) => (t.enabled = isCameraOff));
+      set({ isCameraOff: !isCameraOff });
     },
 
     toggleScreenShare: async () => {
-      const { localStream, isScreenSharing, peerConnection, peerConnections, isCameraOff } = get();
-      if (!localStream) return;
+      const { localStream, isScreenSharing, peerConnection, peerConnections, isCameraOff, callType } = get();
+      if (!localStream || callType !== "video") return;
+
+      const allPeers = () => [...(peerConnection ? [peerConnection] : []), ...Object.values(peerConnections)];
+      const swapVideoTrack = (next: MediaStreamTrack) => {
+        allPeers().forEach((pc) => {
+          const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+          void sender?.replaceTrack(next).catch(console.error);
+        });
+        const old = localStream.getVideoTracks()[0];
+        if (old) { old.stop(); localStream.removeTrack(old); }
+        localStream.addTrack(next);
+      };
 
       try {
         if (!isScreenSharing) {
-          const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-          const screenTrack = displayStream.getVideoTracks()[0];
-
-          screenTrack.onended = () => { void get().toggleScreenShare(); };
-
-          const oldTrack = localStream.getVideoTracks()[0];
-          if (oldTrack) localStream.removeTrack(oldTrack);
-          localStream.addTrack(screenTrack);
-
-          const replaceInSender = (pc: RTCPeerConnection) => {
-            const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-            if (sender) sender.replaceTrack(screenTrack).catch(console.error);
-          };
-          if (peerConnection) replaceInSender(peerConnection);
-          Object.values(peerConnections).forEach(replaceInSender);
-
+          const display = await navigator.mediaDevices.getDisplayMedia({ video: true });
+          const track = display.getVideoTracks()[0];
+          track.onended = () => { if (get().isScreenSharing) void get().toggleScreenShare(); };
+          swapVideoTrack(track);
           set({ isScreenSharing: true, isCameraOff: false });
         } else {
-          const cameraStream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
-          });
-          const cameraTrack = cameraStream.getVideoTracks()[0];
-          if (isCameraOff) cameraTrack.enabled = false;
-
-          const oldTrack = localStream.getVideoTracks()[0];
-          if (oldTrack) { oldTrack.stop(); localStream.removeTrack(oldTrack); }
-          localStream.addTrack(cameraTrack);
-
-          const replaceInSender = (pc: RTCPeerConnection) => {
-            const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-            if (sender) sender.replaceTrack(cameraTrack).catch(console.error);
-          };
-          if (peerConnection) replaceInSender(peerConnection);
-          Object.values(peerConnections).forEach(replaceInSender);
-
+          const camera = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" } });
+          const track = camera.getVideoTracks()[0];
+          track.enabled = !isCameraOff;
+          swapVideoTrack(track);
           set({ isScreenSharing: false });
         }
-      } catch (err) {
-        console.error("Screen sharing error:", err);
-        toast.error("Failed to share screen.");
+      } catch (err: any) {
+        if (err?.name !== "NotAllowedError") toast.error("Couldn't change screen sharing.");
       }
     },
 
-    //  Reset
-
     resetCallStore: () => {
-      cleanMedia();
-      set({
-        callState: "idle", isGroupCall: false, partner: null,
-        peerConnection: null, localStream: null, remoteStream: null,
-        groupChatId: null, groupChatTitle: null,
-        peerConnections: {}, remoteStreams: {}, participants: {},
-        isMuted: false, isCameraOff: false, isScreenSharing: false,
-        isMinimized: false,
-      });
+      session++;
+      closeEverything();
+      set({ ...blankCall });
     },
   };
 });

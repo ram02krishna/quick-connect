@@ -1,439 +1,285 @@
 "use client";
 
 import * as React from "react";
-import { useState, useRef, useEffect } from "react";
-import { Send, Smile, Paperclip, X, Loader2, Mic, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Loader2, Mic, Paperclip, Send, Smile, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { IconButton } from "@components/ui/Button";
 import { useSocketStore } from "@hooks/useSocketStore";
-import { useAuthStore } from "@hooks/useAuthStore";
-import { useChatStore } from "@hooks/useChatStore";
-import api from "@lib/api";
+import { apiErrorMessage } from "@lib/api";
+import { compressImage, kindOfFile, MAX_UPLOAD_BYTES, uploadToCloudinary } from "@lib/media";
+import { formatDuration } from "@lib/format";
+import { cn } from "@lib/utils";
+
+export interface OutgoingAttachment {
+  fileName: string;
+  fileType: string;
+  fileSize: number;
+  fileUrl: string;
+  mimeType: string;
+}
 
 interface MessageInputProps {
   chatId: string;
-  onSendMessage: (content: string, type: string, replyToId?: string | null, attachments?: any[]) => Promise<void>;
-  replyingTo?: any | null;
-  onCancelReply?: () => void;
+  onSendMessage: (content: string, type: string, attachments?: OutgoingAttachment[]) => Promise<void>;
 }
 
-export function MessageInput({ chatId, onSendMessage, replyingTo, onCancelReply }: MessageInputProps) {
-  const socket = useSocketStore((state) => state.socket);
-  const user = useAuthStore((state) => state.user);
-  const chat = useChatStore((state) => state.chats.find(c => c.id === chatId));
+const EMOJIS = ["😀", "😂", "😊", "😍", "🥹", "😎", "🤔", "😮", "😢", "😡", "👍", "👎", "👏", "🙌", "🙏", "💪", "❤️", "🔥", "🎉", "✨", "💯", "✅", "👀", "🤝"];
+const MAX_LENGTH = 5000;
+const MIN_RECORDING_MS = 800;
+const RECORDER_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+
+export function MessageInput({ chatId, onSendMessage }: MessageInputProps) {
+  const socket = useSocketStore((s) => s.socket);
 
   const [text, setText] = useState("");
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [emojiOpen, setEmojiOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [seconds, setSeconds] = useState(0);
 
-  const isBlockedByMe = false;
-  const cannotMessage = false;
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const emojiRef = useRef<HTMLDivElement>(null);
 
-  // Audio recording states
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingTime, setRecordingTime] = useState(0);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const discardRef = useRef(false);
+  const startedAtRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const isTypingRef = useRef(false);
+  const typingTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const isTyping = useRef(false);
 
   const draftKey = `quickconnect:draft:${chatId}`;
 
+  // ── drafts ──────────────────────────────────────────────────────────────────
   useEffect(() => {
-    const savedDraft = window.localStorage.getItem(draftKey);
-    setText(savedDraft || "");
+    setText(localStorage.getItem(draftKey) ?? "");
   }, [draftKey]);
 
   useEffect(() => {
-    const saveDraft = window.setTimeout(() => {
-      if (text.trim()) {
-        window.localStorage.setItem(draftKey, text);
-      } else {
-        window.localStorage.removeItem(draftKey);
-      }
+    const t = setTimeout(() => {
+      if (text.trim()) localStorage.setItem(draftKey, text);
+      else localStorage.removeItem(draftKey);
     }, 250);
-
-    return () => window.clearTimeout(saveDraft);
+    return () => clearTimeout(t);
   }, [draftKey, text]);
 
-  const emojis = ["😀", "😂", "😍", "👍", "🔥", "🎉", "👏", "❤️", "🙌", "🙏", "😮", "😢", "🌟", "💡", "🚀", "✨", "💯", "✅"];
+  // Grow with content, up to about six lines.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+  }, [text]);
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // ── typing indicator ────────────────────────────────────────────────────────
+  const stopTyping = useCallback(() => {
+    clearTimeout(typingTimer.current);
+    if (isTyping.current) {
+      isTyping.current = false;
+      socket?.emit("typing:stop", { chatId });
+    }
+  }, [socket, chatId]);
+
+  const onChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setText(e.target.value);
-
-    if (!socket || !user) return;
-
-    if (!isTypingRef.current) {
-      isTypingRef.current = true;
+    if (!socket) return;
+    if (!isTyping.current) {
+      isTyping.current = true;
       socket.emit("typing:start", { chatId });
     }
-
-    if (typingTimeoutRef.current) {
-      clearTimeout(typingTimeoutRef.current);
-    }
-
-    typingTimeoutRef.current = setTimeout(() => {
-      isTypingRef.current = false;
-      socket.emit("typing:stop", { chatId });
-    }, 2000);
+    clearTimeout(typingTimer.current);
+    typingTimer.current = setTimeout(stopTyping, 2000);
   };
 
+  // ── emoji popover ───────────────────────────────────────────────────────────
   useEffect(() => {
-    return () => {
-      if (typingTimeoutRef.current) {
-        clearTimeout(typingTimeoutRef.current);
-      }
-      if (isTypingRef.current && socket) {
-        socket.emit("typing:stop", { chatId });
-        isTypingRef.current = false;
-      }
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
+    if (!emojiOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (!emojiRef.current?.contains(e.target as Node)) setEmojiOpen(false);
     };
-  }, [chatId, socket]);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setEmojiOpen(false);
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [emojiOpen]);
 
-  const handleSendText = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!text.trim()) return;
+  const insertEmoji = (emoji: string) => {
+    const el = textareaRef.current;
+    const start = el?.selectionStart ?? text.length;
+    const end = el?.selectionEnd ?? text.length;
+    setText((t) => t.slice(0, start) + emoji + t.slice(end));
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(start + emoji.length, start + emoji.length);
+    });
+  };
 
-    try {
-      if (isTypingRef.current && socket) {
-        socket.emit("typing:stop", { chatId });
-        isTypingRef.current = false;
-      }
+  // ── sending text ────────────────────────────────────────────────────────────
+  const send = async () => {
+    const content = text.trim();
+    if (!content || uploading) return;
+    stopTyping();
+    setText("");
+    localStorage.removeItem(draftKey);
+    await onSendMessage(content, "TEXT");
+  };
 
-      const content = text;
-      setText("");
-      window.localStorage.removeItem(draftKey);
-
-      await onSendMessage(content, "TEXT", replyingTo?.id || null);
-      if (replyingTo && onCancelReply) onCancelReply();
-    } catch (err) {
-      console.error("Failed to send message:", err);
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Enter sends, Shift+Enter adds a line. Don't send while an IME is composing.
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      void send();
     }
   };
 
-  const handleEmojiClick = (emoji: string) => {
-    setText((prev) => prev + emoji);
-    setShowEmojiPicker(false);
-  };
-
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    let file = e.target.files?.[0];
-    if (!file) return;
-
-    let msgType = "FILE";
-    if (file.type.startsWith("image/")) msgType = "IMAGE";
-    else if (file.type.startsWith("video/")) msgType = "VIDEO";
-    else if (file.type.startsWith("audio/")) msgType = "AUDIO";
-
-    const maxSize = msgType === "IMAGE" ? 10 * 1024 * 1024 : msgType === "VIDEO" ? 100 * 1024 * 1024 : 50 * 1024 * 1024;
-    
-    if (file.size > maxSize) {
-      alert(`File is too large. Maximum size is ${maxSize / 1024 / 1024}MB.`);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+  // ── attachments ─────────────────────────────────────────────────────────────
+  const uploadAndSend = async (original: File, caption?: string) => {
+    const kind = kindOfFile(original);
+    if (original.size > MAX_UPLOAD_BYTES[kind]) {
+      toast.error(`${original.name} is too large (max ${MAX_UPLOAD_BYTES[kind] / 1024 / 1024} MB).`);
       return;
     }
 
-    setUploading(true);
-    
-    // Check if the file is an image and compress it
-    if (file.type.startsWith("image/")) {
-      try {
-        const imageCompression = (await import("browser-image-compression")).default;
-        const options = {
-          maxSizeMB: 1, // compress down to 1MB
-          maxWidthOrHeight: 1920, // max 1080p resolution
-          useWebWorker: true
-        };
-        file = await imageCompression(file, options);
-      } catch (err) {
-        console.error("Compression error:", err);
-      }
-    }
+    const file = kind === "IMAGE" ? await compressImage(original) : original;
+    const { url } = await uploadToCloudinary(file, `chat-app/${chatId}`);
 
-    try {
-      // 1. Get signature from our backend
-      const sigRes = await api.get(`/media/signature?folder=chat-app/${chatId || "general"}`);
-      const { signature, timestamp, cloudName, apiKey, folder } = sigRes.data.data;
-
-      // 2. Upload directly to Cloudinary
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("api_key", apiKey);
-      formData.append("timestamp", timestamp.toString());
-      formData.append("signature", signature);
-      formData.append("folder", folder);
-
-      const cloudinaryRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/auto/upload`, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!cloudinaryRes.ok) {
-        throw new Error("Failed to upload to Cloudinary");
-      }
-
-      const uploadedFile = await cloudinaryRes.json();
-
-      let msgType = "FILE";
-      if (file.type.startsWith("image/")) msgType = "IMAGE";
-      else if (file.type.startsWith("video/")) msgType = "VIDEO";
-      else if (file.type.startsWith("audio/")) msgType = "AUDIO";
-
-      const attachment = {
-        fileName: file.name,
-        fileType: msgType,
+    await onSendMessage(caption ?? original.name, kind, [
+      {
+        fileName: original.name,
+        fileType: kind,
         fileSize: file.size,
-        fileUrl: uploadedFile.secure_url,
-        mimeType: file.type,
-        thumbUrl: msgType === "IMAGE" || msgType === "VIDEO" 
-          ? uploadedFile.secure_url.replace("/upload/", "/upload/c_fill,h_300,w_300/") 
-          : null,
-      };
+        fileUrl: url,
+        mimeType: file.type || original.type || "application/octet-stream",
+      },
+    ]);
+  };
 
-      await onSendMessage(file.name, msgType, replyingTo?.id || null, [attachment]);
-      if (replyingTo && onCancelReply) onCancelReply();
-    } catch (err: any) {
-      console.error("File upload error:", err);
-      alert(err.message || err.response?.data?.message || "File upload failed.");
+  const onFilesPicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = "";
+    if (files.length === 0) return;
+
+    setUploading(true);
+    try {
+      for (const file of files.slice(0, 10)) await uploadAndSend(file);
+    } catch (err) {
+      toast.error(apiErrorMessage(err, "The upload failed. Please try again."));
     } finally {
       setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
 
-  // ─── Voice Recording Handlers ──────────────────────────────────────────────
+  // ── voice notes ─────────────────────────────────────────────────────────────
+  const releaseRecorder = () => {
+    clearInterval(timerRef.current);
+    recorderRef.current?.stream.getTracks().forEach((t) => t.stop());
+    recorderRef.current = null;
+    setRecording(false);
+    setSeconds(0);
+  };
 
   const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        if (audioBlob.size < 1000) {
-          // Discard empty or very short recordings
-          console.warn("Discarding too short audio recording.");
-          return;
-        }
-
-        const file = new File([audioBlob], `voice-message-${Date.now()}.webm`, {
-          type: "audio/webm",
-        });
-        await uploadAudioFile(file);
-
-        // Stop all tracks on the stream to release the mic
-        stream.getTracks().forEach((track) => track.stop());
-      };
-
-      mediaRecorder.start();
-      setIsRecording(true);
-      setRecordingTime(0);
-      timerRef.current = setInterval(() => {
-        setRecordingTime((prev) => prev + 1);
-      }, 1000);
-    } catch (err) {
-      console.error("Error accessing mic:", err);
-      alert("Could not access microphone. Please check your browser permissions.");
-    }
-  };
-
-  const stopAndSendRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      cleanupRecording();
-    }
-  };
-
-  const cancelRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      // Override onstop to just stop stream and discard
-      mediaRecorderRef.current.onstop = () => {
-        mediaRecorderRef.current?.stream.getTracks().forEach((track) => track.stop());
-      };
-      mediaRecorderRef.current.stop();
-      cleanupRecording();
-    }
-  };
-
-  const cleanupRecording = () => {
-    setIsRecording(false);
-    if (timerRef.current) clearInterval(timerRef.current);
-    setRecordingTime(0);
-  };
-
-  const uploadAudioFile = async (file: File) => {
-    if (file.size > 50 * 1024 * 1024) {
-      alert("Audio file is too large. Maximum size is 50MB.");
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      toast.error("Voice messages aren't supported in this browser.");
       return;
     }
-
-    setUploading(true);
-
     try {
-      // 1. Get signature from our backend
-      const sigRes = await api.get(`/media/signature?folder=chat-app/${chatId || "general"}`);
-      const { signature, timestamp, cloudName, apiKey, folder } = sigRes.data.data;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = RECORDER_TYPES.find((t) => MediaRecorder.isTypeSupported(t));
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
 
-      // 2. Upload directly to Cloudinary
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("api_key", apiKey);
-      formData.append("timestamp", timestamp.toString());
-      formData.append("signature", signature);
-      formData.append("folder", folder);
+      chunksRef.current = [];
+      discardRef.current = false;
+      startedAtRef.current = Date.now();
 
-      const cloudinaryRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/auto/upload`, {
-        method: "POST",
-        body: formData,
-      });
+      recorder.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
+      recorder.onstop = async () => {
+        const tooShort = Date.now() - startedAtRef.current < MIN_RECORDING_MS;
+        const type = recorder.mimeType || mimeType || "audio/webm";
+        const blob = new Blob(chunksRef.current, { type });
+        releaseRecorder(); // the microphone is freed before the upload starts
 
-      if (!cloudinaryRes.ok) {
-        throw new Error("Failed to upload to Cloudinary");
-      }
+        if (discardRef.current) return;
+        if (tooShort || blob.size < 500) return void toast.info("Hold a little longer to record a message.");
 
-      const uploadedFile = await cloudinaryRes.json();
+        const ext = type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm";
+        const file = new File([blob], `voice-message-${Date.now()}.${ext}`, { type: type.split(";")[0] });
 
-      const attachment = {
-        fileName: file.name,
-        fileType: "AUDIO",
-        fileSize: file.size,
-        fileUrl: uploadedFile.secure_url,
-        mimeType: file.type,
-        thumbUrl: null,
+        setUploading(true);
+        try {
+          await uploadAndSend(file, "Voice message");
+        } catch (err) {
+          toast.error(apiErrorMessage(err, "Couldn't send the voice message."));
+        } finally {
+          setUploading(false);
+        }
       };
 
-      await onSendMessage("Voice Message", "AUDIO", replyingTo?.id || null, [attachment]);
-      if (replyingTo && onCancelReply) onCancelReply();
+      recorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+      timerRef.current = setInterval(() => setSeconds((s) => s + 1), 1000);
     } catch (err: any) {
-      console.error("Audio message upload error:", err);
-      alert(err.message || err.response?.data?.message || "Failed to upload audio message.");
-    } finally {
-      setUploading(false);
+      toast.error(err?.name === "NotAllowedError" ? "Microphone access was blocked. Allow it in your browser settings." : "Couldn't access the microphone.");
     }
   };
 
-  const formatDuration = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  const finishRecording = (discard: boolean) => {
+    discardRef.current = discard;
+    if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+    else releaseRecorder();
   };
 
-  if (isBlockedByMe) {
-    return (
-      <div className="p-4 bg-zinc-100 dark:bg-[#202c33] border-t border-[#e9edef] dark:border-[#222e35]/30">
-        <div className="flex flex-col items-center justify-center p-3 text-center">
-          <p className="text-base font-semibold text-zinc-900 dark:text-[#e9edef]">You blocked this contact</p>
-          <p className="text-base text-zinc-500 dark:text-[#8696a0] mt-1">Tap to unblock and send a message.</p>
-        </div>
-      </div>
-    );
-  }
+  // Leaving the chat mid-recording must not leave the microphone on.
+  useEffect(() => {
+    return () => {
+      stopTyping();
+      discardRef.current = true;
+      if (recorderRef.current?.state === "recording") recorderRef.current.stop();
+      else releaseRecorder();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId]);
 
-  if (cannotMessage) {
-    return (
-      <div className="p-4 bg-zinc-100 dark:bg-[#202c33] border-t border-[#e9edef] dark:border-[#222e35]/30 flex items-center justify-center">
-        <p className="text-base text-[#8696a0] font-medium bg-[#111b21]/5 dark:bg-white/5 py-2 px-4 rounded-xl">
-          Only admins can send messages
-        </p>
-      </div>
-    );
-  }
+  const hasText = text.trim().length > 0;
 
   return (
-    <div className="relative flex-shrink-0 z-20">
-      <div className="surface-glass p-3 border-t border-slate-200/70 dark:border-white/5 relative z-20 text-zinc-900 dark:text-zinc-100 select-none">
-
-      {replyingTo && (
-        <div className="flex items-center justify-between p-2.5 mb-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-base">
-          <div className="flex items-start gap-2 border-l-4 border-blue-500 pl-2.5 py-0.5">
-            <div>
-              <p className="font-bold text-blue-600 dark:text-blue-400">
-                Replying to {replyingTo.sender.name}
-              </p>
-              <p className="text-[#667781] dark:text-[#8696a0] truncate max-w-[200px] sm:max-w-md mt-0.5">
-                {replyingTo.content}
-              </p>
-            </div>
-          </div>
+    <div className="shrink-0 border-t border-line bg-surface px-3 py-3 sm:px-4">
+      {recording ? (
+        <div className="flex items-center gap-3" role="status" aria-live="polite">
+          <IconButton label="Discard recording" tone="danger" onClick={() => finishRecording(true)}>
+            <Trash2 size={18} />
+          </IconButton>
+          <span className="flex flex-1 items-center gap-2.5 rounded-md bg-sunken px-3 py-2.5 text-sm">
+            <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-danger" />
+            Recording
+            <span className="tabular-nums text-muted">{formatDuration(seconds)}</span>
+          </span>
           <button
-            onClick={onCancelReply}
-            className="p-1.5 sm:p-1 rounded-lg hover:bg-zinc-200/50 dark:hover:bg-zinc-700/50 active:bg-zinc-300/50 dark:active:bg-zinc-600/40 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors cursor-pointer"
+            type="button"
+            onClick={() => finishRecording(false)}
+            aria-label="Send voice message"
+            className="flex h-10 w-10 items-center justify-center rounded-md bg-accent text-accent-ink hover:bg-accent-strong"
           >
-            <X size={14} />
+            <Send size={17} />
           </button>
         </div>
-      )}
-
-      {isRecording ? (
-        <div className="flex items-center gap-2 relative">
-          <div className="flex-1 flex items-center justify-between bg-zinc-150 dark:bg-[#1f2c34] px-4 py-2.5 rounded-xl border border-zinc-200/40 dark:border-white/5">
-            <div className="flex items-center gap-2.5">
-              <span className="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse inline-block" />
-              <span className="text-base font-bold text-red-500 uppercase tracking-wider">Recording</span>
-              <span className="text-base font-semibold text-zinc-650 dark:text-zinc-300 ml-1">
-                {formatDuration(recordingTime)}
-              </span>
-            </div>
-            
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={cancelRecording}
-                className="p-2 sm:p-1.5 rounded-full hover:bg-red-500/10 active:bg-red-500/20 text-red-500 transition-colors cursor-pointer flex items-center justify-center"
-                title="Discard recording"
-              >
-                <Trash2 size={16} />
-              </button>
-              <button
-                type="button"
-                onClick={stopAndSendRecording}
-                disabled={uploading}
-                className="p-2.5 sm:p-2 rounded-full bg-blue-500 hover:bg-blue-600 active:bg-blue-700 text-white transition-colors cursor-pointer flex items-center justify-center disabled:opacity-50"
-                title="Send voice message"
-              >
-                <Send size={14} />
-              </button>
-            </div>
-          </div>
-        </div>
       ) : (
-        <form onSubmit={handleSendText} className="flex items-center gap-2 relative">
-
-          <div className="relative flex-shrink-0">
-            <button
-              type="button"
-              onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-              disabled={uploading}
-              className={`p-2.5 sm:p-2 rounded-full transition-all cursor-pointer ${showEmojiPicker
-                  ? "bg-zinc-200/60 dark:bg-zinc-700/50 text-blue-500 dark:text-blue-400"
-                  : "hover:bg-zinc-200/50 dark:hover:bg-zinc-700/30 active:bg-zinc-300/50 dark:active:bg-zinc-600/40 text-[#54656f] dark:text-[#aebac1]"
-                }`}
-              title="Emojis"
-            >
-              <Smile size={19} />
-            </button>
-
-            {showEmojiPicker && (
-              <div className="absolute bottom-14 left-0 p-3 bg-white dark:bg-[#1f2c34] border border-zinc-200/80 dark:border-white/10 rounded-2xl shadow-2xl z-20 grid grid-cols-6 gap-2 w-56 max-w-[calc(100vw-32px)]">
-                {emojis.map((emoji) => (
-                  <button
-                    key={emoji}
-                    type="button"
-                    onClick={() => handleEmojiClick(emoji)}
-                    className="hover:scale-125 transition-transform text-xl cursor-pointer p-1"
-                  >
+        <div className="flex items-end gap-1.5">
+          <div ref={emojiRef} className="relative">
+            <IconButton label="Emoji" active={emojiOpen} onClick={() => setEmojiOpen((o) => !o)} disabled={uploading} className="h-10 w-10">
+              <Smile size={20} />
+            </IconButton>
+            {emojiOpen && (
+              <div role="dialog" aria-label="Choose an emoji" className="absolute bottom-12 left-0 z-20 grid w-64 max-w-[calc(100vw-2rem)] animate-fade grid-cols-8 gap-0.5 rounded-lg border border-line bg-surface p-2">
+                {EMOJIS.map((emoji) => (
+                  <button key={emoji} type="button" onClick={() => insertEmoji(emoji)} className="rounded p-1 text-xl hover:bg-sunken">
                     {emoji}
                   </button>
                 ))}
@@ -441,56 +287,41 @@ export function MessageInput({ chatId, onSendMessage, replyingTo, onCancelReply 
             )}
           </div>
 
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            className="p-2 sm:p-2 rounded-full hover:bg-zinc-200/50 dark:hover:bg-zinc-700/30 active:bg-zinc-300/50 dark:active:bg-zinc-600/40 text-zinc-500 dark:text-zinc-400 transition-colors cursor-pointer disabled:opacity-50 disabled:pointer-events-none flex-shrink-0"
-            title="Attach"
-          >
-            {uploading ? <Loader2 size={19} className="animate-spin text-sky-500" /> : <Paperclip size={19} />}
-          </button>
+          <IconButton label="Attach files" onClick={() => fileRef.current?.click()} disabled={uploading} className="h-10 w-10">
+            {uploading ? <Loader2 size={19} className="animate-spin text-accent" /> : <Paperclip size={19} />}
+          </IconButton>
+          <input ref={fileRef} type="file" multiple className="hidden" onChange={onFilesPicked} />
 
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleFileSelect}
-            className="hidden"
+          <textarea
+            ref={textareaRef}
+            value={text}
+            onChange={onChange}
+            onKeyDown={onKeyDown}
+            onBlur={stopTyping}
+            rows={1}
+            maxLength={MAX_LENGTH}
+            placeholder={uploading ? "Uploading…" : "Write a message"}
+            aria-label="Message"
             disabled={uploading}
+            className="max-h-36 min-h-10 flex-1 resize-none rounded-md border border-line bg-paper px-3 py-2 text-[15px] leading-6 placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25 disabled:opacity-60"
           />
 
-          <div className="flex-1 min-w-0">
-            <input
-              type="text"
-              value={text}
-              onChange={handleInputChange}
-              placeholder={uploading ? "Uploading file..." : "Type a message..."}
-              disabled={uploading}
-              className="w-full px-3.5 py-2 sm:px-4 sm:py-2.5 rounded-xl border border-zinc-200 dark:border-white/10 bg-white/90 dark:bg-black/20 shadow-xs text-sm sm:text-[15px] text-zinc-900 dark:text-zinc-100 placeholder-zinc-400 dark:placeholder-zinc-500 focus:outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500/20 transition-all disabled:opacity-50"
-            />
-          </div>
-
-          {text.trim() || uploading ? (
+          {hasText ? (
             <button
-              type="submit"
-              disabled={!text.trim() || uploading}
-              className="p-2 sm:p-2 rounded-full bg-sky-500 hover:bg-sky-600 active:scale-95 text-white transition-all cursor-pointer disabled:opacity-40 disabled:pointer-events-none flex items-center justify-center flex-shrink-0 shadow-xs"
+              type="button"
+              onClick={() => void send()}
+              aria-label="Send message"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent text-accent-ink hover:bg-accent-strong"
             >
               <Send size={17} />
             </button>
           ) : (
-            <button
-              type="button"
-              onClick={startRecording}
-              className="p-2.5 sm:p-2 rounded-full hover:bg-zinc-200/50 dark:hover:bg-[#2a3942] active:bg-zinc-300/50 dark:active:bg-zinc-600/40 text-[#54656f] dark:text-[#aebac1] hover:text-blue-500 transition-all cursor-pointer flex items-center justify-center flex-shrink-0"
-              title="Record voice message"
-            >
-              <Mic size={19} className="text-blue-500 dark:text-blue-400" />
-            </button>
+            <IconButton label="Record voice message" onClick={() => void startRecording()} disabled={uploading} className={cn("h-10 w-10")}>
+              <Mic size={20} />
+            </IconButton>
           )}
-        </form>
+        </div>
       )}
-    </div>
     </div>
   );
 }

@@ -1,119 +1,109 @@
 import type { Request, Response } from "express";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
 import { prisma } from "../config/prisma.js";
 import * as mediaService from "../services/media.service.js";
 import { cloudinary } from "../config/cloudinary.js";
+import { env } from "../config/env.js";
 import { sendSuccess } from "../utils/ApiResponse.js";
 import { ApiError } from "../utils/ApiError.js";
+import { isOwnCloudinaryUrl, sanitizeFileName } from "../utils/validators.js";
+
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const CHAT_FOLDER = new RegExp(`^chat-app/(${UUID})$`, "i");
+
+// Only these may be rendered inline. Anything else (HTML, SVG, scripts…) is always
+// forced to download, otherwise the proxy would serve user-supplied markup from our API origin.
+const INLINE_SAFE_TYPE = /^(image\/(png|jpe?g|gif|webp|avif)|video\/|audio\/|application\/pdf)/i;
 
 // generate a Cloudinary upload signature for direct client-side uploads
 export async function getSignature(req: Request, res: Response) {
-  const folder = req.query.folder as string;
+  const folder = typeof req.query.folder === "string" ? req.query.folder : "";
+  if (!folder) throw new ApiError(400, "Folder is required");
 
-  if (!folder) {
-    throw new ApiError(400, "Folder is required");
+  const isShared = folder === "chat-app/avatars" || folder === "chat-app/general";
+  const chatMatch = folder.match(CHAT_FOLDER);
+
+  if (!isShared && !chatMatch) throw new ApiError(400, "Invalid folder path");
+
+  // Uploading into a chat's folder requires being in that chat.
+  if (chatMatch) {
+    const membership = await prisma.chatMember.findUnique({
+      where: { chatId_userId: { chatId: chatMatch[1], userId: req.user!.id } },
+    });
+    if (!membership) throw new ApiError(403, "You are not in this chat");
   }
 
-  if (!folder.startsWith("chat-app/")) {
-    throw new ApiError(400, "Invalid folder path");
-  }
-
-  // if it's a chat-specific folder, verify the user is in that chat
-  const isAvatar = folder === "chat-app/avatars";
-  const isGeneral = folder === "chat-app/general";
-
-  if (!isAvatar && !isGeneral) {
-    const chatId = folder.split("chat-app/")[1];
-    if (chatId) {
-      const membership = await prisma.chatMember.findUnique({
-        where: { chatId_userId: { chatId, userId: req.user!.id } },
-      });
-      if (!membership) throw new ApiError(403, "You are not in this chat");
-    }
-  }
-
-  const signatureData = mediaService.generateUploadSignature(folder);
-  sendSuccess(res, "Signature generated", signatureData);
+  sendSuccess(res, "Signature generated", mediaService.generateUploadSignature(folder));
 }
 
 // update user avatar URL after a direct Cloudinary upload
 export async function updateAvatarUrl(req: Request, res: Response) {
   const { avatarUrl } = req.body;
-  if (!avatarUrl) throw new ApiError(400, "avatarUrl is required");
+  if (typeof avatarUrl !== "string" || !isOwnCloudinaryUrl(avatarUrl)) {
+    throw new ApiError(400, "avatarUrl must be an uploaded image from this app");
+  }
 
-  await prisma.user.update({
-    where: { id: req.user!.id },
-    data: { avatarUrl },
-  });
-
+  await prisma.user.update({ where: { id: req.user!.id }, data: { avatarUrl } });
   sendSuccess(res, "Avatar updated", { avatarUrl });
 }
 
-// proxy a file download from Cloudinary to set the original filename in the download header
+// Resolve resource type + public id from a stored Cloudinary URL so a signed fetch URL
+// can be generated (plain fetches 401 for private/raw resources).
+function toSignedFetchUrl(rawUrl: string): string {
+  const parsed = new URL(rawUrl);
+  const match = parsed.pathname.match(/\/(image|video|raw|auto)\/upload\/(?:.*?\/)?v\d+\/(.+)$/);
+  if (!match) throw new ApiError(400, "Unrecognised media URL");
+
+  const resourceType = (match[1] === "auto" ? "raw" : match[1]) as "image" | "video" | "raw";
+  return cloudinary.url(decodeURIComponent(match[2]), {
+    resource_type: resourceType,
+    sign_url: true,
+    secure: true,
+    expires_at: Math.floor(Date.now() / 1000) + 300,
+    type: "upload",
+  });
+}
+
+// Proxy a file so downloads keep their original name and extension.
 export async function downloadFile(req: Request, res: Response) {
-  const url = req.query.url as string;
-  const filename = req.query.name as string;
-  const inline = req.query.inline === "true";
+  const url = typeof req.query.url === "string" ? req.query.url : "";
+  const requestedName = typeof req.query.name === "string" ? req.query.name : "";
+  const wantsInline = req.query.inline === "true";
 
   if (!url) throw new ApiError(400, "URL query parameter is required");
-  if (!filename) throw new ApiError(400, "Filename query parameter is required");
+  if (!requestedName) throw new ApiError(400, "Filename query parameter is required");
 
-  // Derive Cloudinary resource_type and public_id from the stored URL so we can
-  // generate a signed fetch URL — plain fetch() returns 401 for raw resources.
-  let fetchUrl = url;
-  try {
-    const parsed = new URL(url);
-    // Cloudinary URL shape: /v1_1/<cloud>/[image|video|raw|auto]/upload/<...transforms>/v<ver>/<public_id>
-    const uploadMatch = parsed.pathname.match(
-      /\/(image|video|raw|auto)\/upload\/(?:.*?\/)?v\d+\/(.+)$/
-    );
-    if (uploadMatch) {
-      const resourceType = uploadMatch[1] === "auto" ? "raw" : uploadMatch[1];
-      const publicId = decodeURIComponent(uploadMatch[2]);
+  // The server fetches this URL, so it must never be an arbitrary address (SSRF).
+  if (!isOwnCloudinaryUrl(url)) throw new ApiError(400, "Only files stored by this app can be downloaded");
 
-      // Generate a signed URL valid for 5 minutes
-      fetchUrl = cloudinary.url(publicId, {
-        resource_type: resourceType as "image" | "video" | "raw",
-        sign_url: true,
-        expires_at: Math.floor(Date.now() / 1000) + 300, // 5 min
-        type: "upload",
-      });
-    }
-  } catch {
-    // If parsing fails, fall back to the original URL
-    fetchUrl = url;
+  const upstream = await fetch(toSignedFetchUrl(url), { redirect: "error" }).catch((err) => {
+    console.error("Download proxy fetch failed:", err);
+    throw new ApiError(502, "Could not reach file storage");
+  });
+  if (!upstream.ok || !upstream.body) {
+    throw new ApiError(upstream.status === 404 ? 404 : 502, "Could not fetch the file from storage");
   }
 
-  try {
-    const response = await fetch(fetchUrl);
-    if (!response.ok) {
-      throw new ApiError(response.status, `Failed to fetch file from storage: ${response.statusText}`);
-    }
+  const contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
+  const inline = wantsInline && INLINE_SAFE_TYPE.test(contentType);
+  const fileName = sanitizeFileName(requestedName);
+  const asciiName = fileName.replace(/[^\x20-\x7e]/g, "_");
 
-    if (inline) {
-      res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
-      res.removeHeader("X-Frame-Options");
-      res.removeHeader("Content-Security-Policy");
-      res.removeHeader("x-frame-options");
-      res.removeHeader("content-security-policy");
-    } else {
-      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-    }
-
-    const contentType = response.headers.get("content-type");
-    if (contentType) res.setHeader("Content-Type", contentType);
-
-    const contentLength = response.headers.get("content-length");
-    if (contentLength) res.setHeader("Content-Length", contentLength);
-
-    if (response.body) {
-      const buffer = await response.arrayBuffer();
-      res.send(Buffer.from(buffer));
-    } else {
-      res.end();
-    }
-  } catch (err: any) {
-    console.error("Download proxy error:", err);
-    if (err instanceof ApiError) throw err;
-    throw new ApiError(500, "Failed to download file from storage proxy: " + (err.message || err));
+  res.setHeader("Content-Type", contentType);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader(
+    "Content-Disposition",
+    `${inline ? "inline" : "attachment"}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`
+  );
+  if (inline) {
+    // Let the web client frame it (e.g. PDF preview) while forbidding scripts in the document.
+    res.removeHeader("X-Frame-Options");
+    res.setHeader("Content-Security-Policy", `default-src 'none'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self' ${env.CLIENT_URL}`);
   }
+
+  const length = upstream.headers.get("content-length");
+  if (length) res.setHeader("Content-Length", length);
+
+  await pipeline(Readable.fromWeb(upstream.body as any), res);
 }

@@ -6,7 +6,7 @@ export interface User {
   name: string;
   username: string;
   avatarUrl: string | null;
-  email?: string | null;
+  bio?: string | null;
 }
 
 export interface ChatMember {
@@ -59,9 +59,12 @@ export interface Chat {
     type: string;
     content: string | null;
     createdAt: string;
+    deletedForEveryoneAt?: string | null;
     sender: { id: string; name: string };
     receipts?: Array<{ userId: string; deliveredAt: string | null; readAt: string | null }>;
   } | null;
+  /** Messages from other people this user hasn't read yet. */
+  unreadCount?: number;
 }
 
 interface ChatState {
@@ -76,6 +79,8 @@ interface ChatState {
   upsertChat: (chat: Chat) => void;
   updateChat: (chatId: string, fields: Partial<Chat>) => void;
   deleteChat: (chatId: string) => void;
+  setUnread: (chatId: string, count: number) => void;
+  incrementUnread: (chatId: string) => void;
 
   setMessages: (chatId: string, messages: Message[]) => void;
   prependMessages: (chatId: string, messages: Message[]) => void;
@@ -140,15 +145,42 @@ export const useChatStore = create<ChatState>()(
           chats: state.chats.map((c) => (c.id === chatId ? { ...c, ...fields } : c)),
         })),
 
+      setUnread: (chatId, count) =>
+        set((state) => {
+          const chat = state.chats.find((c) => c.id === chatId);
+          if (!chat || (chat.unreadCount ?? 0) === count) return {};
+          return { chats: state.chats.map((c) => (c.id === chatId ? { ...c, unreadCount: count } : c)) };
+        }),
+
+      incrementUnread: (chatId) =>
+        set((state) => ({
+          chats: state.chats.map((c) => (c.id === chatId ? { ...c, unreadCount: (c.unreadCount ?? 0) + 1 } : c)),
+        })),
+
       removeMessageForMe: (chatId, messageId) =>
         set((state) => {
           const thread = state.messages[chatId] || [];
           const updatedThread = thread.filter((message) => message.id !== messageId);
+          const previous = updatedThread[updatedThread.length - 1];
           return {
             messages: { ...state.messages, [chatId]: updatedThread },
+            // If the removed message was the chat-list preview, fall back to the one before it.
             chats: state.chats.map((chat) =>
               chat.id === chatId && chat.lastMessageId === messageId
-                ? { ...chat, lastMessageId: null, lastMessage: null }
+                ? {
+                    ...chat,
+                    lastMessageId: previous?.id ?? null,
+                    lastMessage: previous
+                      ? {
+                          id: previous.id,
+                          type: previous.type,
+                          content: previous.content,
+                          createdAt: previous.createdAt,
+                          sender: { id: previous.senderId, name: previous.sender?.name ?? "" },
+                          receipts: previous.receipts,
+                        }
+                      : null,
+                  }
                 : chat
             ),
           };
@@ -204,13 +236,15 @@ export const useChatStore = create<ChatState>()(
           if (thread.some((m) => m.id === message.id)) return {};
 
           // replace matching optimistic message if found
-          const tempIndex = thread.findIndex(
+          const tempIndex = message.id.startsWith("temp-")
+            ? -1
+            : thread.findIndex(
             (m) =>
               m.id.startsWith("temp-") &&
               m.senderId === message.senderId &&
               m.content === message.content &&
               m.type === message.type
-          );
+            );
 
           let updatedThread;
           if (tempIndex !== -1) {
@@ -235,7 +269,8 @@ export const useChatStore = create<ChatState>()(
                 type: message.type,
                 content: message.content,
                 createdAt: message.createdAt,
-                sender: { id: message.senderId, name: message.sender.name },
+                sender: { id: message.senderId, name: message.sender?.name ?? "" },
+                receipts: message.receipts ?? [],
               },
             };
             // Splice updated chat to front without sorting the whole array
@@ -312,6 +347,7 @@ export const useChatStore = create<ChatState>()(
           const isSelected = state.selectedChatId === chatId;
           return {
             chats: state.chats.filter((c) => c.id !== chatId),
+            messages: Object.fromEntries(Object.entries(state.messages).filter(([id]) => id !== chatId)),
             selectedChatId: isSelected ? null : state.selectedChatId,
           };
         }),

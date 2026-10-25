@@ -4,6 +4,8 @@ import pg from "pg";
 import { env } from "./env.js";
 
 const pool = new pg.Pool({ connectionString: env.DATABASE_URL });
+// An idle client dropping its connection must not crash the process.
+pool.on("error", (err) => console.error("Postgres pool error:", err.message));
 const adapter = new PrismaPg(pool);
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;

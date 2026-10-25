@@ -1,125 +1,174 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ── Design tokens ──────────────────────────────────────────────────────────
+   One warm neutral scale and a single accent. Components use these names
+   (bg-paper, text-ink, border-line …) so light/dark never needs `dark:` pairs. */
+:root {
+  --paper: #f4f1ea;
+  --surface: #fbfaf6;
+  --sunken: #ebe7dc;
+  --line: #dad4c4;
+  --ink: #1c1b18;
+  --muted: #6b6558;
+  --faint: #9a9484;
+  --accent: #c2410c;
+  --accent-strong: #9a3412;
+  --accent-ink: #ffffff;
+  --accent-soft: #f8e1d0;
+  --bubble-out: #f6d9c2;
+  --bubble-in: #ffffff;
+  --danger: #b42318;
+  --danger-soft: #fbe4e1;
+  --ok: #2f7d4f;
+  color-scheme: light;
+}
+
+.dark {
+  --paper: #131311;
+  --surface: #1a1a17;
+  --sunken: #232320;
+  --line: #34332e;
+  --ink: #ece9e0;
+  --muted: #a09b8c;
+  --faint: #6f6b5f;
+  --accent: #ff8f55;
+  --accent-strong: #ffb184;
+  --accent-ink: #1d0e04;
+  --accent-soft: #3a2314;
+  --bubble-out: #47301f;
+  --bubble-in: #24231f;
+  --danger: #ff8a7d;
+  --danger-soft: #3d1e1a;
+  --ok: #6cc08b;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Fraunces Variable", ui-serif, Georgia, "Times New Roman", serif;
+
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-bubble-out: var(--bubble-out);
+  --color-bubble-in: var(--bubble-in);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-ok: var(--ok);
+
+  --animate-rise: rise 0.28s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-fade: fade 0.18s ease-out both;
+  --animate-ring: ring 1.8s ease-out infinite;
+}
+
 html {
-  scroll-behavior: smooth;
   font-size: 15px;
   -webkit-text-size-adjust: 100%;
 }
 
-@custom-variant dark (&:where(.dark, .dark *));
-
-@theme {
-  --font-sans: var(--font-outfit), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-  --font-display: var(--font-outfit), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-  
-  --color-brand-primary: #0284c7;
-  --color-brand-hover: #0369a1;
-}
-
-:root {
-  --bg-ambient: #f7f9fc;
-  --text-primary: #101828;
-  --text-secondary: #667085;
-}
-
-.dark {
-  --bg-ambient: #09090b;
-  --text-primary: #ffffff;
-  --text-secondary: #a1a1aa;
-}
-
-body, input, button, select, textarea, h1, h2, h3, h4, h5, h6 {
-  font-family: var(--font-sans);
-}
-
 body {
-  background:
-    radial-gradient(circle at top left, rgba(14, 165, 233, 0.10), transparent 32rem),
-    var(--bg-ambient);
-  color: var(--text-primary);
-  overflow-x: hidden;
-  min-height: 100vh;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
   min-height: 100dvh;
   overscroll-behavior-y: none;
+  font-feature-settings: "ss01", "cv11";
+  text-rendering: optimizeLegibility;
 }
 
-button, a, input, select, textarea {
+button,
+a,
+input,
+select,
+textarea {
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
 }
 
+button:not(:disabled),
+[role="button"] {
+  cursor: pointer;
+}
+
 ::selection {
-  background: rgba(14, 165, 233, 0.22);
-  color: inherit;
+  background: var(--accent-soft);
+  color: var(--ink);
 }
 
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Subtle ruled texture behind the conversation, like a notebook page. */
 .chat-canvas {
-  background-color: #f7f9fc;
-  background-image:
-    radial-gradient(rgba(148, 163, 184, 0.16) 1px, transparent 1px),
-    linear-gradient(135deg, rgba(255,255,255,.8), rgba(241,245,249,.65));
-  background-size: 22px 22px, 100% 100%;
+  background-color: var(--paper);
+  background-image: linear-gradient(to bottom, transparent calc(100% - 1px), color-mix(in srgb, var(--line) 22%, transparent) 0);
+  background-size: 100% 28px;
 }
 
-.dark .chat-canvas {
-  background-color: #0b141a;
-  background-image:
-    radial-gradient(rgba(148, 163, 184, 0.07) 1px, transparent 1px),
-    linear-gradient(135deg, rgba(14, 24, 31, .9), rgba(11, 20, 26, .96));
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes ring {
+  0% { transform: scale(1); opacity: 0.5; }
+  100% { transform: scale(1.7); opacity: 0; }
+}
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes typingDot {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+  40% { transform: translateY(-3px); opacity: 1; }
 }
 
-.surface-glass {
-  background: rgba(255, 255, 255, 0.85);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+.skeleton {
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--sunken) 30%, color-mix(in srgb, var(--sunken) 60%, var(--surface)) 50%, var(--sunken) 70%);
+  background-size: 300% 100%;
+  animation: shimmer 1.6s linear infinite;
 }
 
-.dark .surface-glass {
-  background: rgba(24, 32, 39, 0.88);
-}
-
-/* Typing animation dots */
 .typing-dot {
   display: inline-block;
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background-color: currentColor;
-  animation: typingDot 1.4s infinite ease-in-out both;
+  background: currentColor;
+  animation: typingDot 1.2s infinite ease-in-out both;
 }
+.typing-dot:nth-child(2) { animation-delay: 0.15s; }
+.typing-dot:nth-child(3) { animation-delay: 0.3s; }
 
-.typing-dot:nth-child(1) { animation-delay: -0.32s; }
-.typing-dot:nth-child(2) { animation-delay: -0.16s; }
+/* Scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
 
-@keyframes typingDot {
-  0%, 80%, 100% { transform: scale(0); opacity: 0.3; }
-  40% { transform: scale(1); opacity: 1; }
-}
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 
-/* Custom Scrollbars */
-::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(156, 163, 175, 0.4);
-  border-radius: 9999px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(156, 163, 175, 0.7);
-}
-
-/* Hide scrollbar utility */
-.no-scrollbar::-webkit-scrollbar {
-  display: none;
-}
-.no-scrollbar {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -1,191 +1,138 @@
 "use client";
 
 import * as React from "react";
-import { useState, useRef, useEffect } from "react";
-import { Play, Pause, Volume2, VolumeX, Loader2, Download } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Download, Loader2, Pause, Play } from "lucide-react";
+import { formatDuration } from "@lib/format";
+import { cn } from "@lib/utils";
 
 interface CustomAudioPlayerProps {
   src: string;
-  isSelf?: boolean;
   onDownload?: () => void;
 }
 
-export function CustomAudioPlayer({ src, isSelf = false, onDownload }: CustomAudioPlayerProps) {
+const RATES = [1, 1.5, 2] as const;
+
+// Only one voice note should play at a time.
+let activeAudio: HTMLAudioElement | null = null;
+
+export function CustomAudioPlayer({ src, onDownload }: CustomAudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [isMuted, setIsMuted] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [rateIndex, setRateIndex] = useState(0);
 
   useEffect(() => {
-    const audio = new Audio(src);
+    const audio = new Audio();
+    audio.preload = "metadata";
+    audio.src = src;
     audioRef.current = audio;
 
-    const onPlay = () => setIsPlaying(true);
-    const onPause = () => setIsPlaying(false);
-    const onTimeUpdate = () => setCurrentTime(audio.currentTime);
-    const onLoadedMetadata = () => {
-      setDuration(audio.duration);
+    const onMeta = () => {
+      // Browser-recorded WebM voice notes report an infinite duration until the end is
+      // reached. Seeking far past the end forces the real length to be calculated.
+      if (audio.duration === Infinity) {
+        const fixDuration = () => {
+          audio.removeEventListener("timeupdate", fixDuration);
+          audio.currentTime = 0;
+          setDuration(audio.duration);
+        };
+        audio.addEventListener("timeupdate", fixDuration);
+        audio.currentTime = 1e101;
+      } else {
+        setDuration(audio.duration);
+      }
       setLoading(false);
     };
-    const onCanPlay = () => setLoading(false);
-    const onEnded = () => {
-      setIsPlaying(false);
-      setCurrentTime(0);
-      audio.currentTime = 0;
-    };
+    const onTime = () => { if (audio.duration !== Infinity) setCurrent(audio.currentTime); };
+    const onEnd = () => { setPlaying(false); setCurrent(0); audio.currentTime = 0; };
 
-    audio.addEventListener("play", onPlay);
-    audio.addEventListener("pause", onPause);
-    audio.addEventListener("timeupdate", onTimeUpdate);
-    audio.addEventListener("loadedmetadata", onLoadedMetadata);
-    audio.addEventListener("canplay", onCanPlay);
-    audio.addEventListener("ended", onEnded);
-
-    // Trigger metadata load manually if already cached
-    if (audio.readyState >= 2) {
-      setDuration(audio.duration);
-      setLoading(false);
-    }
+    audio.addEventListener("loadedmetadata", onMeta);
+    audio.addEventListener("canplay", () => setLoading(false));
+    audio.addEventListener("timeupdate", onTime);
+    audio.addEventListener("play", () => setPlaying(true));
+    audio.addEventListener("pause", () => setPlaying(false));
+    audio.addEventListener("ended", onEnd);
+    audio.addEventListener("error", () => { setFailed(true); setLoading(false); });
 
     return () => {
       audio.pause();
-      audio.removeEventListener("play", onPlay);
-      audio.removeEventListener("pause", onPause);
-      audio.removeEventListener("timeupdate", onTimeUpdate);
-      audio.removeEventListener("loadedmetadata", onLoadedMetadata);
-      audio.removeEventListener("canplay", onCanPlay);
-      audio.removeEventListener("ended", onEnded);
+      if (activeAudio === audio) activeAudio = null;
+      audio.removeAttribute("src");
+      audio.load();
     };
   }, [src]);
 
-  const togglePlay = () => {
-    if (!audioRef.current) return;
-    if (isPlaying) {
-      audioRef.current.pause();
-    } else {
-      audioRef.current.play().catch((err) => console.error("Playback failed:", err));
-    }
+  const toggle = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (playing) return audio.pause();
+    if (activeAudio && activeAudio !== audio) activeAudio.pause();
+    activeAudio = audio;
+    audio.playbackRate = RATES[rateIndex];
+    audio.play().catch(() => setFailed(true));
   };
 
-  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!audioRef.current) return;
-    const seekTo = parseFloat(e.target.value);
-    audioRef.current.currentTime = seekTo;
-    setCurrentTime(seekTo);
+  const cycleRate = () => {
+    const next = (rateIndex + 1) % RATES.length;
+    setRateIndex(next);
+    if (audioRef.current) audioRef.current.playbackRate = RATES[next];
   };
 
-  const toggleMute = () => {
-    if (!audioRef.current) return;
-    audioRef.current.muted = !isMuted;
-    setIsMuted(!isMuted);
+  const seek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const t = Number(e.target.value);
+    if (audioRef.current) audioRef.current.currentTime = t;
+    setCurrent(t);
   };
 
-  const formatTime = (time: number) => {
-    if (isNaN(time)) return "0:00";
-    const mins = Math.floor(time / 60);
-    const secs = Math.floor(time % 60);
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-  };
-
-  const progressPercentage = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const pct = duration > 0 ? Math.min(100, (current / duration) * 100) : 0;
 
   return (
-    <div
-      className={`flex items-center gap-3 px-3 py-2.5 rounded-xl w-full max-w-[240px] sm:max-w-[270px] select-none border transition-colors ${
-        isSelf
-          ? "bg-black/10 dark:bg-black/20 border-white/10"
-          : "bg-black/5 dark:bg-black/15 border-zinc-250/20 dark:border-white/5"
-      }`}
-    >
-      {/* Play/Pause Trigger */}
+    <div className="flex w-64 max-w-full items-center gap-2.5">
       <button
         type="button"
-        onClick={togglePlay}
-        disabled={loading}
-        className={`h-8 w-8 rounded-full flex items-center justify-center flex-shrink-0 cursor-pointer transition-all active:scale-95 disabled:opacity-50 ${
-          isSelf
-            ? "bg-white text-zinc-700 hover:bg-white/95 hover:shadow-md"
-            : "bg-zinc-600 hover:bg-zinc-700 text-white"
-        }`}
+        onClick={toggle}
+        disabled={loading || failed}
+        aria-label={playing ? "Pause voice message" : "Play voice message"}
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink text-paper disabled:opacity-50"
       >
-        {loading ? (
-          <Loader2 size={14} className="animate-spin" />
-        ) : isPlaying ? (
-          <Pause size={14} fill="currentColor" />
-        ) : (
-          <Play size={14} fill="currentColor" className="ml-0.5" />
-        )}
+        {loading ? <Loader2 size={15} className="animate-spin" /> : playing ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" className="ml-0.5" />}
       </button>
 
-      {/* Progress slider bar & text duration */}
-      <div className="flex-1 min-w-0 flex flex-col gap-1.5">
-        <div className="relative w-full flex items-center">
-          <input
-            type="range"
-            min={0}
-            max={duration || 100}
-            value={currentTime}
-            onChange={handleSeek}
-            disabled={loading || duration === 0}
-            className={`w-full h-1 rounded-lg appearance-none cursor-pointer focus:outline-none ${
-              isSelf ? "accent-white bg-white/20" : "accent-zinc-600 bg-zinc-250 dark:bg-zinc-700"
-            }`}
-            style={{
-              background: `linear-gradient(to right, ${
-                isSelf ? "#ffffff" : "#00D8E3"
-              } 0%, ${
-                isSelf ? "#ffffff" : "#00D8E3"
-              } ${progressPercentage}%, ${
-                isSelf ? "rgba(255, 255, 255, 0.2)" : "rgba(120, 120, 120, 0.2)"
-              } ${progressPercentage}%, ${
-                isSelf ? "rgba(255, 255, 255, 0.2)" : "rgba(120, 120, 120, 0.2)"
-              } 100%)`
-            }}
-          />
-        </div>
-        <div
-          className={`flex items-center justify-between text-base font-semibold leading-none ${
-            isSelf ? "text-blue-100/90" : "text-zinc-500 dark:text-zinc-400"
-          }`}
-        >
-          <span>{formatTime(currentTime)}</span>
-          <span>{formatTime(duration)}</span>
+      <div className="min-w-0 flex-1">
+        <input
+          type="range"
+          min={0}
+          max={duration || 1}
+          step={0.1}
+          value={current}
+          onChange={seek}
+          disabled={loading || failed || duration === 0}
+          aria-label="Seek"
+          className="block h-1.5 w-full cursor-pointer appearance-none rounded-full disabled:cursor-default [&::-moz-range-thumb]:h-3 [&::-moz-range-thumb]:w-3 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-ink [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-ink"
+          style={{ background: `linear-gradient(to right, var(--ink) ${pct}%, color-mix(in srgb, var(--ink) 20%, transparent) ${pct}%)` }}
+        />
+        <div className="mt-1 flex items-center justify-between text-xs tabular-nums text-muted">
+          <span>{failed ? "Can't play" : formatDuration(playing || current > 0 ? current : duration)}</span>
+          <button
+            type="button"
+            onClick={cycleRate}
+            aria-label={`Playback speed ${RATES[rateIndex]}x`}
+            className={cn("rounded px-1 font-medium hover:bg-ink/10", rateIndex > 0 && "text-ink")}
+          >
+            {RATES[rateIndex]}x
+          </button>
         </div>
       </div>
 
-      {/* Mute button */}
-      <button
-        type="button"
-        onClick={toggleMute}
-        disabled={loading}
-        className={`p-1.5 rounded-full cursor-pointer transition-colors ${
-          isSelf
-            ? "text-white/80 hover:text-white hover:bg-white/10"
-            : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-black/5 dark:hover:bg-white/5"
-        }`}
-        title={isMuted ? "Unmute" : "Mute"}
-      >
-        {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} />}
-      </button>
-
       {onDownload && (
-        <button
-          type="button"
-          onClick={onDownload}
-          className={`p-1.5 rounded-full cursor-pointer transition-colors ${
-            isSelf
-              ? "text-white/80 hover:text-white hover:bg-white/10"
-              : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-black/5 dark:hover:bg-white/5"
-          }`}
-          title="Download audio"
-          aria-label="Download audio"
-        >
+        <button type="button" onClick={onDownload} aria-label="Download voice message" className="shrink-0 rounded p-1.5 text-muted hover:text-ink">
           <Download size={15} />
         </button>
       )}
-
     </div>
   );
 }

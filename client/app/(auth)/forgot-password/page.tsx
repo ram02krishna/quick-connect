@@ -1,203 +1,136 @@
 "use client";
 
 import * as React from "react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { AuthCard } from "@components/auth/AuthCard";
+import { Eye, EyeOff } from "lucide-react";
+import { AuthCard, FormAlert } from "@components/auth/AuthCard";
 import { Input } from "@components/ui/Input";
 import { Button } from "@components/ui/Button";
-import { Eye, EyeOff } from "lucide-react";
-import api from "@lib/api";
+import api, { apiErrorMessage } from "@lib/api";
 
 export default function ForgotPasswordPage() {
   const router = useRouter();
 
-  const [step, setStep] = useState(1);
+  const [step, setStep] = useState<"request" | "reset">("request");
   const [identifier, setIdentifier] = useState("");
   const [userId, setUserId] = useState("");
-  const [maskedEmail, setMaskedEmail] = useState("");
-
   const [otp, setOtp] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [notice, setNotice] = useState("");
+  const [done, setDone] = useState(false);
   const [loading, setLoading] = useState(false);
+  const redirectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const handleRequestCode = async (e: React.FormEvent) => {
-    e.preventDefault();
+  useEffect(() => () => clearTimeout(redirectTimer.current), []);
+
+  const requestCode = async (e?: React.FormEvent) => {
+    e?.preventDefault();
     setError("");
-    setSuccess("");
+    setNotice("");
     setLoading(true);
-
     try {
-      const res = await api.post("/auth/forgot-password", {
-        identifier: identifier.trim(),
-        username: identifier.trim(),
-      });
-      const { userId: uid, email } = res.data.data;
-      
-      setUserId(uid);
-      setMaskedEmail(email);
-      setSuccess(`A 6-digit reset code has been sent to your registered email: ${email}`);
-      
-      setTimeout(() => {
-        setSuccess("");
-        setStep(2);
-      }, 2500);
-    } catch (err: any) {
-      console.warn("Forgot password lookup failed:", err.message || err);
-      setError(err.response?.data?.message || "Failed to locate account. Check the username or email.");
+      const res = await api.post("/auth/forgot-password", { identifier: identifier.trim() });
+      setUserId(res.data.data.userId);
+      setStep("reset");
+      setNotice("If that account exists, we've emailed a 6-digit code to its address.");
+    } catch (err) {
+      setError(apiErrorMessage(err, "Couldn't send a reset code. Please try again."));
     } finally {
       setLoading(false);
     }
   };
 
-  const handleResetPassword = async (e: React.FormEvent) => {
+  const resetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
-    setSuccess("");
+    setNotice("");
     setLoading(true);
-
     try {
-      await api.post("/auth/reset-password", {
-        userId,
-        otp: otp.trim(),
-        newPassword,
-      });
-
-      setSuccess("Password updated successfully! Redirecting you to login...");
-      setTimeout(() => {
-        router.push("/login");
-      }, 2500);
-    } catch (err: any) {
-      console.warn("Password reset failed:", err.message || err);
-      setError(err.response?.data?.message || "Invalid or expired reset code. Please try again.");
-    } finally {
+      await api.post("/auth/reset-password", { userId, otp, newPassword });
+      setDone(true);
+      redirectTimer.current = setTimeout(() => router.push("/login"), 1800);
+    } catch (err) {
+      setError(apiErrorMessage(err, "That code didn't work. Please try again."));
       setLoading(false);
     }
   };
 
   return (
     <AuthCard
-      title={step === 1 ? "Reset Password" : "New Password"}
+      title={step === "request" ? "Reset your password" : "Choose a new password"}
       subtitle={
-        step === 1
-          ? "Recover your QuickConnect account credentials"
-          : `Set a new secure password`
+        step === "request"
+          ? "Enter your username or email and we'll send you a code."
+          : "Enter the code from your email and a new password."
       }
+      footer={<Link href="/login" className="underline underline-offset-4 hover:text-accent">Back to sign in</Link>}
     >
-      {error && (
-        <div className="p-3.5 rounded-xl border border-red-500/20 bg-red-500/10 text-sm text-red-400 font-medium mb-4">
-          {error}
-        </div>
-      )}
+      {error && <FormAlert tone="error">{error}</FormAlert>}
+      {notice && <FormAlert tone="info">{notice}</FormAlert>}
+      {done && <FormAlert tone="success">Password updated. Taking you to sign in…</FormAlert>}
 
-      {success && (
-        <div className="p-3.5 rounded-xl border border-green-500/20 bg-green-500/10 text-sm text-green-400 font-medium mb-4">
-          {success}
-        </div>
-      )}
-
-      {step === 1 ? (
-        <form onSubmit={handleRequestCode} className="space-y-4">
-          <div className="space-y-1">
-            <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider pl-1">
-              Username or Email
-            </label>
-            <Input
-              type="text"
-              value={identifier}
-              onChange={(e) => setIdentifier(e.target.value)}
-              placeholder="Enter your username or email"
-              required
-              disabled={loading}
-            />
-          </div>
-
-          <Button type="submit" variant="shimmer" className="w-full mt-2 py-3" disabled={loading || !!success}>
-            {loading ? "Sending OTP..." : "Send Reset Code"}
+      {step === "request" ? (
+        <form onSubmit={requestCode} className="space-y-5">
+          <Input
+            label="Username or email"
+            value={identifier}
+            onChange={(e) => setIdentifier(e.target.value)}
+            autoCapitalize="none"
+            autoFocus
+            required
+            disabled={loading}
+          />
+          <Button type="submit" size="lg" className="w-full" disabled={loading || !identifier.trim()}>
+            {loading ? "Sending…" : "Send code"}
           </Button>
-
-          <div className="text-center text-sm text-zinc-500 mt-6">
-            <Link href="/login" className="hover:text-zinc-300 transition-colors">
-              Back to Login
-            </Link>
-          </div>
         </form>
       ) : (
-        <form onSubmit={handleResetPassword} className="space-y-4">
-          <div className="space-y-2 text-center mb-2">
-            <p className="text-sm text-zinc-400">
-              Enter the 6-digit confirmation code sent to
-              <br />
-              <strong className="text-zinc-200">{maskedEmail}</strong>
-            </p>
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider pl-1">
-              Verification Code
-            </label>
-            <Input
-              type="text"
-              maxLength={6}
-              value={otp}
-              onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
-              placeholder="123456"
-              className="text-center text-2xl tracking-[0.5em] font-bold"
-              required
-              disabled={loading}
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider pl-1">
-              New Password
-            </label>
-            <div className="relative flex items-center">
-              <Input
-                type={showPassword ? "text" : "password"}
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="Minimum 8 characters"
-                required
-                disabled={loading}
-                className="pr-10"
-              />
+        <form onSubmit={resetPassword} className="space-y-5">
+          <Input
+            label="Code"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={6}
+            value={otp}
+            onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
+            placeholder="000000"
+            className="h-14 text-center font-mono text-2xl tracking-[0.4em]"
+            autoFocus
+            disabled={loading || done}
+          />
+          <Input
+            label="New password"
+            type={showPassword ? "text" : "password"}
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            hint="At least 8 characters."
+            autoComplete="new-password"
+            disabled={loading || done}
+            trailing={
               <button
                 type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 text-zinc-500 hover:text-zinc-300 transition-colors p-1 cursor-pointer"
-                disabled={loading}
+                onClick={() => setShowPassword((v) => !v)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                className="flex h-8 w-8 items-center justify-center rounded text-muted hover:text-ink"
               >
                 {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
-            </div>
-          </div>
-
-          <Button type="submit" variant="shimmer" className="w-full mt-2 py-3" disabled={loading || !!success}>
-            {loading ? "Resetting password..." : "Update Password"}
+            }
+          />
+          <Button type="submit" size="lg" className="w-full" disabled={loading || done || otp.length !== 6 || newPassword.length < 8}>
+            {loading ? "Updating…" : "Update password"}
           </Button>
-
-          <div className="flex flex-col items-center gap-4 mt-6 text-sm text-zinc-500">
-            <button
-              type="button"
-              onClick={() => {
-                setStep(1);
-                setOtp("");
-                setNewPassword("");
-                setError("");
-                setSuccess("");
-              }}
-              disabled={loading}
-              className="text-brand-primary hover:text-brand-hover font-semibold transition-colors disabled:opacity-50 disabled:pointer-events-none cursor-pointer"
-            >
-              Request a new code
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => { setStep("request"); setOtp(""); setNewPassword(""); setError(""); setNotice(""); }}
+            className="text-sm text-muted underline underline-offset-4 hover:text-accent"
+          >
+            Start over
+          </button>
         </form>
       )}
     </AuthCard>

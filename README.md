@@ -1,19 +1,19 @@
 # QuickConnect - Connect Beyond Boundaries
 
-**A high-performance, real-time communication platform featuring 1-on-1 and group chats, crystal-clear WebRTC audio/video calling, rich media sharing, and real-time presence tracking.**
+**A real-time messenger with 1-on-1 and group chats, WebRTC voice/video calls, voice notes, file sharing and presence.**
 
 ---
 
 ## Overview
 
-**QuickConnect** is a modern, enterprise-ready real-time communication web application designed for seamless instant messaging and high-definition voice/video calling. Built using Next.js 15 (App Router), React 19, Tailwind CSS v4, Express 5, Prisma ORM with PostgreSQL, Upstash Redis, and Socket.io, QuickConnect provides sub-millisecond message delivery, adaptive WebRTC mesh calls, rich media sharing, and end-to-end security workflows.
+**QuickConnect** is a real-time communication web app for instant messaging and voice/video calling. Built using Next.js 15 (App Router), React 19, Tailwind CSS v4, Express 5, Prisma ORM with PostgreSQL, Upstash Redis, and Socket.io, QuickConnect provides real-time delivery over WebSockets, WebRTC mesh calls, rich media sharing, and email-verified accounts. Message text and email addresses are encrypted at rest (AES-256-CBC, key derived from `JWT_SECRET`); this is not end-to-end encryption.
 
 ---
 
 ## Key Features
 
 ### Real-Time Messaging
-- **Instant Messaging**: Sub-millisecond message delivery powered by WebSocket (`Socket.io`) connections.
+- **Instant Messaging**: Real-time delivery over WebSocket (`Socket.io`) connections.
 - **Direct & Group Chats**: 1-on-1 private conversations and multi-user collaborative group rooms.
 - **Delivery & Read Receipts**: Real-time status indicators (Sent, Delivered, Read) with single/double checkmarks.
 - **Typing Indicators**: Real-time debounce typing status across direct and group conversations.
@@ -25,11 +25,11 @@
 - **Peer-to-Peer Calling**: Low-latency 1-on-1 audio and video calls powered by WebRTC mesh connections.
 - **Group Call Signaling**: Real-time broadcast and invite signaling for multi-participant group calls.
 - **Floating Picture-in-Picture (PiP)**: Minimize active calls into a movable, floating widget to browse chats while continuing conversations.
-- **Call Controls**: Mute/unmute microphone, toggle video camera, switch audio output, and share screen.
+- **Call Controls**: Mute/unmute microphone, toggle video camera, adjust the other person's volume, and share your screen (video calls).
 
 ### Rich Media & File Sharing
 - **Multi-Format Support**: Send images, videos, documents (PDF, DOCX, ZIP, etc.), and audio voice notes.
-- **Voice Notes & Waveforms**: Record voice messages directly in-browser with interactive audio waveform players and playback rate control (1x, 1.5x, 2x).
+- **Voice Notes & Waveforms**: Record voice messages directly in-browser with an in-bubble player (seek bar and 1x / 1.5x / 2x playback speed).
 - **Direct Cloudinary Uploads**: Client-side image compression (`browser-image-compression`) combined with backend signed signatures for direct, secure CDN uploads.
 - **Media Lightbox**: Fullscreen interactive preview lightbox for images and videos.
 - **Secure File Downloads**: Backend media proxy route to preserve original file names and extensions.
@@ -48,9 +48,9 @@
 
 ### Modern UI & UX
 - **Theme Support**: Seamless Dark Mode and Light Mode switching powered by `next-themes`.
-- **Accessible Primitives**: Built using Radix UI primitives (Dialog, Dropdown Menu, Tabs, ScrollArea, Avatar).
-- **Responsive Layout**: Mobile-optimized navigation with adaptive collapsible sidebars and fluid transitions.
-- **Interactive Feedback**: Polished toast notifications powered by `sonner`.
+- **Accessible Primitives**: Built using Radix UI primitives (Dialog, Dropdown Menu).
+- **Responsive Layout**: Mobile-friendly navigation with a collapsible conversation list.
+- **Interactive Feedback**: Toast notifications powered by `sonner`.
 
 ---
 
@@ -230,7 +230,7 @@ cd QuickConnect
 | Variable | Required | Description | Example |
 | :--- | :---: | :--- | :--- |
 | `NODE_ENV` | Yes | Environment mode | `development` / `production` |
-| `PORT` | No | Server listening port (default: 5000) | `5000` |
+| `PORT` | No | Server listening port (default: 5000) | `1000` |
 | `CLIENT_URL` | Yes | Frontend client origin URL for CORS | `http://localhost:3000` |
 | `DATABASE_URL` | Yes | PostgreSQL connection string | `postgresql://user:pass@localhost:5432/quickconnect` |
 | `UPSTASH_REDIS_REST_URL` | Yes | Upstash Redis REST API URL | `https://xxxx.upstash.io` |
@@ -243,7 +243,7 @@ cd QuickConnect
 | `CLOUDINARY_API_KEY` | Yes | Cloudinary API Key | `1234567890` |
 | `CLOUDINARY_API_SECRET` | Yes | Cloudinary API Secret | `your_cloudinary_api_secret` |
 | `RATE_LIMIT_WINDOW_MS` | No | Rate limit window in ms (default: 900000) | `900000` |
-| `RATE_LIMIT_MAX_REQUESTS` | No | Max requests per window | `5000` |
+| `RATE_LIMIT_MAX_REQUESTS` | No | Max requests per window | `1000` |
 
 ### Frontend (`client/.env.local`)
 
@@ -393,3 +393,22 @@ Contributions are welcome! Feel free to open an issue or submit a pull request:
 Built by [Ramkrishna](https://github.com/ram02krishna)
 
 </div>
+
+
+---
+
+## Revision notes (UI redesign and bug-fix pass)
+
+### Behaviour changes to be aware of
+- **Sign-in now requires a verified email.** Previously unverified accounts could log in. An unverified user who enters the right password is sent to the verification screen (a fresh code is emailed). Re-registering with an address that was never verified reclaims that account.
+- **OTP codes** are generated with `crypto.randomInt`, allow 5 guesses per code, and can be re-sent once per minute. Forgot-password no longer reveals whether an account exists.
+- **Group permissions are enforced on the server**: only the owner can rename, add or remove members, or delete a group; anyone can leave. If the owner leaves, ownership passes to the longest-standing member.
+- **Deleting a direct conversation removes it for both people** (this is what the API always did; the UI now says so).
+- **Member email addresses are no longer sent to other chat members.**
+- `SYSTEM` messages ("X added Y") can only be created by the server.
+- Search only returns users who have verified their email.
+
+### Configuration
+- `server/.env.example`: the `DATABASE_URL` line had been swallowed by a comment. `RATE_LIMIT_MAX_REQUESTS` now defaults to 1000 per 15 min; login/OTP endpoints have their own stricter limiter that counts failed attempts only.
+- `client/.env.local.example`: optional `NEXT_PUBLIC_TURN_*` variables. Without a TURN relay, calls between some mobile/corporate networks will not connect.
+- New client dependencies: `@fontsource-variable/instrument-sans`, `@fontsource-variable/fraunces` (run `npm install` in `client/`).

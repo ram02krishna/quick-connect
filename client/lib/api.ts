@@ -7,40 +7,42 @@ const api = axios.create({
   baseURL: API_BASE_URL,
   withCredentials: true,
   timeout: 15000,
-  headers: {
-    "Content-Type": "application/json",
-  },
+  headers: { "Content-Type": "application/json" },
 });
 
-// Attach access token to headers if it exists
-api.interceptors.request.use(
-  (config) => {
-    const token = useAuthStore.getState().token;
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => Promise.reject(error)
-);
+api.interceptors.request.use((config) => {
+  const token = useAuthStore.getState().token;
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
 
-// Intercept responses to log out when unauthorized
+const PUBLIC_PATHS = ["/login", "/signup", "/verify-email", "/forgot-password"];
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
-    if (error.response?.status === 401) {
-      console.warn("Session expired or unauthorized, logging out...");
-      useAuthStore.getState().logout();
-      if (typeof window !== "undefined") {
-        const currentPath = window.location.pathname;
-        if (!currentPath.startsWith("/login") && !currentPath.startsWith("/signup") && !currentPath.startsWith("/verify-email")) {
-          window.location.href = `/login?redirect=${encodeURIComponent(currentPath)}`;
-        }
+    const isAuthCall = String(error.config?.url ?? "").startsWith("/auth/");
+
+    // A 401 from a sign-in attempt just means wrong credentials — it is not an expired session.
+    if (error.response?.status === 401 && !isAuthCall && typeof window !== "undefined") {
+      const { clearSession } = await import("./session");
+      clearSession();
+
+      const path = window.location.pathname;
+      if (!PUBLIC_PATHS.some((p) => path.startsWith(p))) {
+        window.location.href = `/login?redirect=${encodeURIComponent(path)}`;
       }
     }
     return Promise.reject(error);
   }
 );
+
+/** Pulls the server's message out of an axios error, with a sensible fallback. */
+export function apiErrorMessage(error: unknown, fallback = "Something went wrong. Please try again.") {
+  const err = error as { response?: { data?: { message?: string } }; code?: string };
+  if (err?.code === "ERR_NETWORK") return "Can't reach the server. Check your connection.";
+  return err?.response?.data?.message || fallback;
+}
 
 export default api;
 export { API_BASE_URL };

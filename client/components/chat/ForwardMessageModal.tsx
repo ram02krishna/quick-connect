@@ -1,120 +1,103 @@
 "use client";
 
 import * as React from "react";
-import { useState } from "react";
-import { X, Search, Forward, Loader2 } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Check, Loader2, Search } from "lucide-react";
+import { toast } from "sonner";
 import { Avatar } from "@components/ui/Avatar";
+import { Button } from "@components/ui/Button";
+import { Modal } from "@components/ui/Dialog";
 import { useAuthStore } from "@hooks/useAuthStore";
 import { useChatStore } from "@hooks/useChatStore";
+import api, { apiErrorMessage } from "@lib/api";
+import { getChatDisplay } from "@lib/chatHelpers";
 
 interface ForwardMessageModalProps {
-  messageToForward: any;
+  message: any;
   onClose: () => void;
-  onForward: (chatId: string) => Promise<void>;
 }
 
-export function ForwardMessageModal({ messageToForward, onClose, onForward }: ForwardMessageModalProps) {
+/** Forward one message to any number of your other conversations. */
+export function ForwardMessageModal({ message, onClose }: ForwardMessageModalProps) {
+  const myId = useAuthStore((s) => s.user?.id);
+  const chats = useChatStore((s) => s.chats);
   const [search, setSearch] = useState("");
-  const [isSending, setIsSending] = useState(false);
-  
-  const chats = useChatStore((state) => state.chats);
-  const user = useAuthStore((state) => state.user);
-  
-  // Filter out the chat where the message originated
-  const filteredChats = chats
-    .filter(c => c.id !== messageToForward?.chatId)
-    .filter(c => c.title?.toLowerCase().includes(search.toLowerCase()) || 
-      c.members?.some((m: any) => m.user?.name?.toLowerCase().includes(search.toLowerCase())));
+  const [picked, setPicked] = useState<string[]>([]);
+  const [sending, setSending] = useState(false);
 
-  const handleForwardClick = async (chatId: string) => {
-    setIsSending(true);
-    try {
-      await onForward(chatId);
-      onClose();
-    } catch (err) {
-      console.error("Failed to forward:", err);
-      setIsSending(false);
-    }
-  };
+  const options = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return chats
+      .filter((c) => c.id !== message.chatId)
+      .map((chat) => ({ chat, display: getChatDisplay(chat, myId) }))
+      .filter(({ display }) => !q || display.name.toLowerCase().includes(q));
+  }, [chats, search, message.chatId, myId]);
 
-  const getChatName = (chat: any) => {
-    if (chat.type === "GROUP") return chat.title || "Group Chat";
-    const partner = chat.members?.find((m: any) => m.userId !== user?.id);
-    return partner?.user?.name || "Saved Messages";
-  };
+  const toggle = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
 
-  const getChatAvatar = (chat: any) => {
-    if (chat.type === "GROUP") return chat.photoUrl || "/logo.png";
-    const partner = chat.members?.find((m: any) => m.userId !== user?.id);
-    return partner?.user?.avatarUrl;
+  const forward = async () => {
+    setSending(true);
+    const attachments = (message.attachments ?? []).map((a: any) => ({
+      fileName: a.fileName, fileType: a.fileType, fileSize: a.fileSize, fileUrl: a.fileUrl, mimeType: a.mimeType,
+    }));
+
+    const results = await Promise.allSettled(
+      picked.map((chatId) =>
+        api.post(`/messages/${chatId}`, { content: message.content, type: message.type, attachments })
+      )
+    );
+
+    const failed = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    if (failed.length === 0) toast.success(picked.length === 1 ? "Message forwarded" : `Forwarded to ${picked.length} chats`);
+    else toast.error(apiErrorMessage(failed[0].reason, `Couldn't forward to ${failed.length} chat${failed.length === 1 ? "" : "s"}.`));
+
+    setSending(false);
+    if (failed.length < picked.length) onClose();
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 select-none animate-in fade-in duration-200">
-      <div className="bg-white dark:bg-[#111b21] rounded-2xl w-full max-w-sm flex flex-col shadow-2xl overflow-hidden animate-in slide-in-from-bottom-4 duration-300">
-        
-        <div className="flex items-center justify-between p-4 border-b border-zinc-200 dark:border-white/10">
-          <h2 className="text-lg font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
-            <Forward size={18} className="text-zinc-600" />
-            Forward message to
-          </h2>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-full hover:bg-zinc-100 dark:hover:bg-white/10 text-zinc-500 dark:text-zinc-400 transition-colors"
-          >
-            <X size={18} />
-          </button>
+    <Modal open onOpenChange={(open) => !open && !sending && onClose()} title="Forward message">
+      <div className="px-5 pt-4">
+        <div className="relative">
+          <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search chats"
+            aria-label="Search chats"
+            className="h-10 w-full rounded-md border border-line bg-paper pl-9 pr-3 text-sm placeholder:text-faint focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
+          />
         </div>
-
-        <div className="p-3 border-b border-zinc-100 dark:border-white/5 bg-white dark:bg-[#182229]">
-          <div className="relative">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
-            <input
-              type="text"
-              placeholder="Search chats or contacts..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 bg-white dark:bg-[#222e35] border border-zinc-200 dark:border-white/5 rounded-xl text-base focus:outline-none focus:ring-2 focus:ring-zinc-600/50 text-zinc-900 dark:text-zinc-100 placeholder-zinc-400"
-            />
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto max-h-[60vh]">
-          {filteredChats.length === 0 ? (
-            <div className="p-6 text-center text-zinc-500 dark:text-zinc-400 text-base">
-              No recent chats found to forward to.
-            </div>
-          ) : (
-            <div className="flex flex-col">
-              {filteredChats.map((chat) => (
-                <button
-                  key={chat.id}
-                  disabled={isSending}
-                  onClick={() => handleForwardClick(chat.id)}
-                  className="flex items-center gap-3 p-3 hover:bg-white dark:hover:bg-[#182229] transition-colors cursor-pointer border-b border-zinc-100 dark:border-white/5 last:border-0 text-left disabled:opacity-50"
-                >
-                  <Avatar src={getChatAvatar(chat)} name={getChatName(chat)} size="md" />
-                  <div className="flex-1 min-w-0">
-                    <p className="font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-                      {getChatName(chat)}
-                    </p>
-                  </div>
-                  <div className="p-1.5 rounded-full bg-zinc-100 dark:bg-zinc-600/10 text-zinc-600 flex-shrink-0">
-                    <Forward size={14} />
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {isSending && (
-          <div className="absolute inset-0 bg-white/50 dark:bg-black/50 backdrop-blur-sm flex items-center justify-center z-10">
-            <Loader2 className="animate-spin text-zinc-600" size={32} />
-          </div>
-        )}
-
       </div>
-    </div>
+
+      <div className="mt-2 min-h-[10rem] flex-1 overflow-y-auto px-2">
+        {options.length === 0 ? (
+          <p className="px-3 py-10 text-center text-sm text-muted">No other chats to forward to.</p>
+        ) : (
+          options.map(({ chat, display }) => {
+            const on = picked.includes(chat.id);
+            return (
+              <button key={chat.id} type="button" role="checkbox" aria-checked={on} onClick={() => toggle(chat.id)} className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-left hover:bg-sunken">
+                <Avatar src={display.avatarUrl} name={display.name} isGroup={display.isGroup} size="sm" />
+                <span className="min-w-0 flex-1 truncate text-sm font-medium">{display.name}</span>
+                <span className={`flex h-5 w-5 items-center justify-center rounded border ${on ? "border-accent bg-accent text-accent-ink" : "border-line"}`}>
+                  {on && <Check size={13} strokeWidth={3} />}
+                </span>
+              </button>
+            );
+          })
+        )}
+      </div>
+
+      <div className="flex items-center justify-between gap-2 border-t border-line px-5 py-4">
+        <span className="text-sm text-muted">{picked.length} selected</span>
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={onClose} disabled={sending}>Cancel</Button>
+          <Button variant="accent" onClick={() => void forward()} disabled={sending || picked.length === 0}>
+            {sending ? <><Loader2 size={15} className="animate-spin" /> Sending…</> : "Forward"}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }

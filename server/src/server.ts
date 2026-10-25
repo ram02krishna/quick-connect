@@ -5,12 +5,14 @@ import app from "./app.js";
 import { env } from "./config/env.js";
 import { prisma } from "./config/prisma.js";
 import { initializeSockets } from "./sockets/index.js";
+import { setIO } from "./sockets/io.js";
+import { resetPresence } from "./sockets/presence.js";
 
 const PORT = Number(env.PORT) || 5000;
 
 const httpServer = createServer(app);
 
-export const io = new Server(httpServer, {
+const io = new Server(httpServer, {
   cors: {
     origin: env.CLIENT_URL,
     credentials: true,
@@ -19,21 +21,22 @@ export const io = new Server(httpServer, {
     maxDisconnectionDuration: 2 * 60 * 1000,
     skipMiddlewares: true,
   },
-  // Tighter keepalive: detect dropped connections in ~10s instead of 25–60s
+  // Detect dropped connections in ~30s at worst instead of the 45s default.
   pingTimeout: 20000,
   pingInterval: 10000,
-  // Compress socket frames to reduce payload size on large messages/media metadata
-  perMessageDeflate: {
-    threshold: 1024, // only compress frames > 1KB
-  },
+  perMessageDeflate: { threshold: 1024 },
+  maxHttpBufferSize: 1e6,
 });
 
+setIO(io);
 initializeSockets(io);
 
 async function startServer() {
   try {
     await prisma.$connect();
     console.log("Database connected");
+
+    await resetPresence();
 
     httpServer.listen(PORT, () => {
       console.log(`QuickConnect server running on port ${PORT} (${env.NODE_ENV})`);
@@ -47,32 +50,36 @@ async function startServer() {
   }
 }
 
+let shuttingDown = false;
+
 async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`\n${signal} received — shutting down...`);
 
   const forceExit = setTimeout(() => {
     console.error("Forced shutdown after 10s");
     process.exit(1);
   }, 10_000);
+  forceExit.unref();
 
-  httpServer.close(async () => {
-    io.close();
-    await prisma.$disconnect();
-    clearTimeout(forceExit);
-    process.exit(0);
-  });
+  // io.close() also closes the underlying HTTP server and drops open sockets;
+  // waiting on httpServer.close() alone would hang on long-lived websocket connections.
+  await io.close();
+  await prisma.$disconnect();
+  process.exit(0);
 }
 
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
-process.on("uncaughtException", (err: Error) => {
-  console.error("Uncaught Exception:", err.message, err.stack);
-  process.exit(1);
-});
-
+// A bug in one request/socket handler must not take every connected user down with it.
 process.on("unhandledRejection", (reason: unknown) => {
   console.error("Unhandled Rejection:", reason);
+});
+
+process.on("uncaughtException", (err: Error) => {
+  console.error("Uncaught Exception:", err.message, err.stack);
   process.exit(1);
 });
 

@@ -2,734 +2,323 @@
 
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
+import { ChevronDown, Maximize2, Mic, MicOff, MonitorOff, MonitorUp, Phone, PhoneOff, Video, VideoOff, Volume1, Volume2, VolumeX } from "lucide-react";
 import { useCallStore } from "@hooks/useCallStore";
-import {
-  Phone,
-  PhoneOff,
-  Mic,
-  MicOff,
-  Video,
-  VideoOff,
-  Volume2,
-  Volume1,
-  VolumeX,
-  MonitorUp,
-  MonitorOff,
-  Maximize2,
-  Minimize2,
-  ChevronDown,
-  ArrowLeftRight,
-} from "lucide-react";
 import { Avatar } from "@components/ui/Avatar";
-import { toast } from "sonner";
+import { formatDuration } from "@lib/format";
+import { cn } from "@lib/utils";
 
-interface VideoStreamProps {
-  stream: MediaStream | null;
-  isLocal?: boolean;
-  isMirrored?: boolean;
-  objectFit?: "cover" | "contain";
-  onClick?: () => void;
-  className?: string;
-}
-
-function VideoStream({
-  stream,
-  isLocal = false,
-  isMirrored = false,
-  objectFit = "cover",
-  onClick,
-  className = "",
-}: VideoStreamProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
+/**
+ * Plays everyone else's voice. It lives at the root of the overlay and is never unmounted
+ * while a call exists, so minimising/maximising the call can't silence the audio.
+ */
+function RemoteAudio({ stream, volume }: { stream: MediaStream; volume: number }) {
+  const ref = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
-    if (!videoRef.current || !stream) return;
-    if (videoRef.current.srcObject !== stream) {
-      videoRef.current.srcObject = stream;
-    }
+    const el = ref.current;
+    if (!el) return;
+    if (el.srcObject !== stream) el.srcObject = stream;
+    void el.play().catch(() => undefined);
   }, [stream]);
 
-  if (!stream) return null;
+  useEffect(() => {
+    if (ref.current) ref.current.volume = Math.max(0, Math.min(1, volume));
+  }, [volume]);
 
+  return <audio ref={ref} autoPlay />;
+}
+
+function VideoTile({ stream, mirrored, fit = "cover", className }: { stream: MediaStream; mirrored?: boolean; fit?: "cover" | "contain"; className?: string }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    if (ref.current && ref.current.srcObject !== stream) ref.current.srcObject = stream;
+  }, [stream]);
+
+  // Always muted: sound comes from <RemoteAudio>, and the local preview must never echo.
   return (
     <video
-      ref={videoRef}
+      ref={ref}
       autoPlay
       playsInline
-      muted={isLocal}
-      onClick={onClick}
-      className={`h-full w-full ${
-        objectFit === "contain" ? "object-contain" : "object-cover"
-      } ${isMirrored ? "-scale-x-100" : ""} ${className}`}
+      muted
+      className={cn("h-full w-full", fit === "contain" ? "object-contain" : "object-cover", mirrored && "-scale-x-100", className)}
     />
   );
 }
 
+function ControlButton({ label, onClick, active, disabled, children, tone = "default" }: {
+  label: string; onClick: () => void; active?: boolean; disabled?: boolean; children: React.ReactNode; tone?: "default" | "end";
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      aria-pressed={active}
+      className={cn(
+        "flex h-12 w-12 items-center justify-center rounded-full transition-colors disabled:opacity-40",
+        tone === "end" ? "bg-[#d92d20] text-white hover:bg-[#b42318]"
+          : active ? "bg-white text-black" : "bg-white/15 text-white hover:bg-white/25"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function CallOverlay() {
-  const {
-    callState,
-    callType,
-    isGroupCall,
-    partner,
-    groupChatTitle,
-    participants,
-    localStream,
-    remoteStream,
-    remoteStreams,
-    isMuted,
-    isCameraOff,
-    acceptCall,
-    acceptGroupCall,
-    declineCall,
-    endCall,
-    toggleMute,
-    toggleCamera,
-    toggleScreenShare,
-    isScreenSharing,
-    ringVolume,
-    setRingVolume,
-    isMinimized,
-    setIsMinimized,
-  } = useCallStore();
+  const callState = useCallStore((s) => s.callState);
+  const callType = useCallStore((s) => s.callType);
+  const isGroupCall = useCallStore((s) => s.isGroupCall);
+  const partner = useCallStore((s) => s.partner);
+  const groupChatTitle = useCallStore((s) => s.groupChatTitle);
+  const participants = useCallStore((s) => s.participants);
+  const localStream = useCallStore((s) => s.localStream);
+  const remoteStream = useCallStore((s) => s.remoteStream);
+  const remoteStreams = useCallStore((s) => s.remoteStreams);
+  const isMuted = useCallStore((s) => s.isMuted);
+  const isCameraOff = useCallStore((s) => s.isCameraOff);
+  const isScreenSharing = useCallStore((s) => s.isScreenSharing);
+  const isMinimized = useCallStore((s) => s.isMinimized);
+  const callVolume = useCallStore((s) => s.callVolume);
+  const actions = useCallStore.getState;
 
-  const remoteAudioRef = useRef<HTMLVideoElement>(null);
-  const [callDuration, setCallDuration] = useState(0);
-  const [isSpeaker, setIsSpeaker] = useState(true);
-  const [fitMode, setFitMode] = useState<"cover" | "contain">("cover");
-  const [isSwapped, setIsSwapped] = useState(false); // Swap local & remote main view
-  const [showVolumeSlider, setShowVolumeSlider] = useState(false);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const [seconds, setSeconds] = useState(0);
+  const [swapped, setSwapped] = useState(false);
+  const [showVolume, setShowVolume] = useState(false);
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const drag = useRef<{ dx: number; dy: number } | null>(null);
+  const widgetRef = useRef<HTMLDivElement>(null);
 
-  // Duration timer when connected
   useEffect(() => {
-    if (callState === "connected") {
-      setCallDuration(0);
-      timerRef.current = setInterval(() => {
-        setCallDuration((prev) => prev + 1);
-      }, 1000);
-    } else {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-      setCallDuration(0);
-      setIsSwapped(false);
-    }
-
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
+    if (callState !== "connected") { setSeconds(0); setSwapped(false); return; }
+    const t = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
   }, [callState]);
 
-  // Auto-focus window on call state change to guarantee browser keydown capture
-  useEffect(() => {
-    if ((callState === "incoming" || callState === "outgoing") && !isMinimized) {
-      window.focus();
-    }
-  }, [callState, isMinimized]);
-
-  // Adjust volume for remote audio stream during connected calls
-  useEffect(() => {
-    if (remoteAudioRef.current) {
-      remoteAudioRef.current.volume = Math.max(0, Math.min(1, ringVolume));
-    }
-  }, [ringVolume]);
-
-  // Handle volume control via keys F2/- (Volume Down by 1%) and F3/+/= (Volume Up by 1%)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (callState === "idle") return;
-
-      if (e.key === "F2" || e.key === "-") {
-        e.preventDefault();
-        const currentVol = useCallStore.getState().ringVolume;
-        const delta = e.shiftKey ? 0.05 : 0.01;
-        const newVol = Math.max(0, Math.round((currentVol - delta) * 100) / 100);
-        setRingVolume(newVol);
-        toast.info(`Volume: ${Math.round(newVol * 100)}%`, { id: "call-volume", duration: 1000 });
-      } else if (e.key === "F3" || e.key === "+" || e.key === "=") {
-        e.preventDefault();
-        const currentVol = useCallStore.getState().ringVolume;
-        const delta = e.shiftKey ? 0.05 : 0.01;
-        const newVol = Math.min(1, Math.round((currentVol + delta) * 100) / 100);
-        setRingVolume(newVol);
-        toast.info(`Volume: ${Math.round(newVol * 100)}%`, { id: "call-volume", duration: 1000 });
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [callState, setRingVolume]);
-
-  // Route remote audio to speaker or earpiece when isSpeaker changes
-  useEffect(() => {
-    if (!remoteAudioRef.current) return;
-    const el = remoteAudioRef.current as any;
-    if (typeof el.setSinkId === "function") {
-      el.setSinkId(isSpeaker ? "" : "communications").catch(() => {});
-    }
-  }, [isSpeaker]);
-
-  // Bind remote stream to the audio element for audio calls
-  useEffect(() => {
-    if (!remoteAudioRef.current || !remoteStream) return;
-    if (remoteAudioRef.current.srcObject !== remoteStream) {
-      remoteAudioRef.current.srcObject = remoteStream;
-    }
-  }, [remoteStream]);
+  useEffect(() => { if (callState === "idle") { setPos(null); setShowVolume(false); } }, [callState]);
 
   if (callState === "idle" || (!partner && !isGroupCall)) return null;
 
-  const formatTime = (secs: number) => {
-    const mins = Math.floor(secs / 60);
-    const remainingSecs = secs % 60;
-    return `${mins.toString().padStart(2, "0")}:${remainingSecs.toString().padStart(2, "0")}`;
-  };
+  const title = isGroupCall ? groupChatTitle || "Group call" : partner?.name ?? "";
+  const avatar = isGroupCall ? null : partner?.avatarUrl ?? null;
+  const connected = callState === "connected";
+  const hasVideo = callType === "video";
+  const canShare = hasVideo && typeof navigator !== "undefined" && "getDisplayMedia" in (navigator.mediaDevices ?? {});
 
-  const handleAccept = () => {
-    if (isGroupCall) {
-      acceptGroupCall();
-    } else {
-      acceptCall();
-    }
-  };
+  const status =
+    callState === "incoming" ? `Incoming ${isGroupCall ? "group " : ""}${hasVideo ? "video" : "voice"} call`
+    : callState === "outgoing" ? "Calling…"
+    : formatDuration(seconds);
 
-  const displayName = isGroupCall ? groupChatTitle || "Group Call" : partner?.name;
-  const displayAvatar = isGroupCall ? null : partner?.avatarUrl;
+  const audioStreams: [string, MediaStream][] = isGroupCall
+    ? Object.entries(remoteStreams)
+    : remoteStream ? [["peer", remoteStream]] : [];
 
-  const activeRemoteStreams = Object.entries(remoteStreams);
-  const numStreams = activeRemoteStreams.length;
-  const totalTiles = numStreams + (localStream && !isCameraOff ? 1 : 0);
+  const audioLayer = (
+    <div className="hidden">
+      {audioStreams.map(([id, stream]) => <RemoteAudio key={id} stream={stream} volume={callVolume} />)}
+    </div>
+  );
 
-  let gridCols = "grid-cols-1";
-  if (totalTiles === 2) gridCols = "grid-cols-1 sm:grid-cols-2";
-  else if (totalTiles >= 3 && totalTiles <= 4) gridCols = "grid-cols-2 grid-rows-2";
-  else if (totalTiles > 4) gridCols = "grid-cols-2 sm:grid-cols-3";
+  const endOrCancel = () => actions().endCall();
+  const accept = () => (isGroupCall ? void actions().acceptGroupCall() : void actions().acceptCall());
 
-  const getVolumeIcon = () => {
-    if (ringVolume === 0) return <VolumeX size={19} />;
-    if (ringVolume < 0.5) return <Volume1 size={19} />;
-    return <Volume2 size={19} />;
-  };
+  const VolumeIcon = callVolume === 0 ? VolumeX : callVolume < 0.5 ? Volume1 : Volume2;
 
-  // Determine what video streams to show in main vs PiP
-  const mainStream = isSwapped ? localStream : remoteStream;
-  const pipStream = isSwapped ? remoteStream : localStream;
-  const isMainMirrored = isSwapped && !isScreenSharing;
-  const isPipMirrored = !isSwapped && !isScreenSharing;
-
-  // ─── MINIMIZED FLOATING MINI CALL WIDGET ──────────────────────────────────────
+  // ── minimised, draggable widget ─────────────────────────────────────────────
   if (isMinimized) {
+    const mainStream = swapped ? localStream : remoteStream;
+    const onPointerDown = (e: React.PointerEvent) => {
+      if ((e.target as HTMLElement).closest("button")) return;
+      const rect = widgetRef.current!.getBoundingClientRect();
+      drag.current = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    };
+    const onPointerMove = (e: React.PointerEvent) => {
+      if (!drag.current || !widgetRef.current) return;
+      const { width, height } = widgetRef.current.getBoundingClientRect();
+      setPos({
+        x: Math.min(Math.max(8, e.clientX - drag.current.dx), window.innerWidth - width - 8),
+        y: Math.min(Math.max(8, e.clientY - drag.current.dy), window.innerHeight - height - 8),
+      });
+    };
+
     return (
-      <div className="fixed bottom-5 right-5 z-50 flex flex-col items-center bg-zinc-900/95 border border-white/20 shadow-2xl rounded-2xl p-2.5 backdrop-blur-xl animate-in fade-in zoom-in-95 select-none touch-none">
-        {/* Hidden Audio Elements for Audio Calls to keep playback alive */}
-        {callType === "audio" && (
-          <div className="absolute w-0 h-0 opacity-0 pointer-events-none">
-            {isGroupCall ? (
-              activeRemoteStreams.map(([userId, stream]) => (
-                <VideoStream key={userId} stream={stream} />
-              ))
-            ) : (
-              <video ref={remoteAudioRef} autoPlay playsInline />
-            )}
+      <div
+        ref={widgetRef}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={() => (drag.current = null)}
+        style={pos ? { left: pos.x, top: pos.y } : undefined}
+        className={cn(
+          "fixed z-50 w-56 touch-none cursor-grab select-none overflow-hidden rounded-lg border border-white/15 bg-[#161614] text-white active:cursor-grabbing",
+          !pos && "bottom-4 right-4"
+        )}
+        role="region"
+        aria-label="Call in progress"
+      >
+        {audioLayer}
+        {hasVideo && connected && mainStream ? (
+          <div className="relative h-32 bg-black">
+            <VideoTile stream={mainStream} mirrored={swapped && !isScreenSharing} />
+          </div>
+        ) : (
+          <div className="flex items-center gap-3 p-3">
+            <Avatar src={avatar} name={title} size="sm" isGroup={isGroupCall} />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">{title}</p>
+              <p className="text-xs tabular-nums text-white/60">{status}</p>
+            </div>
           </div>
         )}
-
-        {/* Video Call Mini Preview */}
-        {callType === "video" && (
-          <div
-            onClick={() => setIsMinimized(false)}
-            className="relative w-44 h-28 sm:w-52 sm:h-32 bg-black rounded-xl overflow-hidden mb-2 cursor-pointer group shadow-inner border border-white/10"
-            title="Click to maximize call"
-          >
-            {mainStream ? (
-              <VideoStream stream={mainStream} objectFit="cover" isMirrored={isMainMirrored} />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center bg-zinc-950 text-zinc-500 text-xs">
-                No Video
-              </div>
-            )}
-            <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1.5 text-white font-medium text-xs">
-              <Maximize2 size={16} />
-              <span>Expand</span>
-            </div>
-            {callState === "connected" && (
-              <div className="absolute bottom-1.5 left-1.5 bg-black/60 backdrop-blur-md px-1.5 py-0.5 rounded text-[10px] font-mono text-emerald-400">
-                {formatTime(callDuration)}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Voice Call Mini Bar */}
-        {callType === "audio" && (
-          <div
-            onClick={() => setIsMinimized(false)}
-            className="flex items-center gap-2.5 px-2 py-1 cursor-pointer group mb-1.5"
-            title="Click to maximize call"
-          >
-            <div className="relative flex items-center justify-center">
-              <Avatar src={displayAvatar} name={displayName || "?"} size="sm" />
-              <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500 border-2 border-zinc-900 animate-pulse" />
-            </div>
-            <div className="flex flex-col text-left pr-2">
-              <span className="text-xs font-semibold text-white truncate max-w-[110px]">
-                {displayName}
-              </span>
-              <span className="text-[11px] font-mono text-emerald-400">
-                {callState === "connected" ? formatTime(callDuration) : "Calling..."}
-              </span>
-            </div>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setIsMinimized(false);
-              }}
-              className="p-1 rounded-full text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
-              title="Maximize"
-            >
-              <Maximize2 size={14} />
-            </button>
-          </div>
-        )}
-
-        {/* Mini Controls Row */}
-        <div className="flex items-center gap-1.5 pt-1 border-t border-white/10 w-full justify-around">
-          {/* Maximize Button */}
-          <button
-            onClick={() => setIsMinimized(false)}
-            className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 active:scale-95 text-zinc-200 hover:text-white transition-all"
-            title="Maximize Call Screen"
-          >
-            <Maximize2 size={14} />
+        <div className="flex items-center justify-between gap-1 border-t border-white/10 px-2 py-1.5">
+          <button type="button" onClick={() => actions().setIsMinimized(false)} aria-label="Expand call" className="flex h-8 w-8 items-center justify-center rounded hover:bg-white/15"><Maximize2 size={15} /></button>
+          <button type="button" onClick={() => actions().toggleMute()} disabled={!connected} aria-label={isMuted ? "Unmute" : "Mute"} className={cn("flex h-8 w-8 items-center justify-center rounded hover:bg-white/15 disabled:opacity-40", isMuted && "bg-white text-black hover:bg-white")}>
+            {isMuted ? <MicOff size={15} /> : <Mic size={15} />}
           </button>
-
-          {/* Mute Mic */}
-          <button
-            onClick={toggleMute}
-            className={`p-1.5 rounded-full transition-all active:scale-95 ${
-              isMuted
-                ? "bg-red-500 text-white"
-                : "bg-white/10 hover:bg-white/20 text-zinc-200 hover:text-white"
-            }`}
-            title={isMuted ? "Unmute Mic" : "Mute Mic"}
-          >
-            {isMuted ? <MicOff size={14} /> : <Mic size={14} />}
-          </button>
-
-          {/* Camera Toggle for Video */}
-          {callType === "video" && (
-            <button
-              onClick={toggleCamera}
-              className={`p-1.5 rounded-full transition-all active:scale-95 ${
-                isCameraOff
-                  ? "bg-red-500 text-white"
-                  : "bg-white/10 hover:bg-white/20 text-zinc-200 hover:text-white"
-              }`}
-              title={isCameraOff ? "Turn Camera On" : "Turn Camera Off"}
-            >
-              {isCameraOff ? <VideoOff size={14} /> : <Video size={14} />}
-            </button>
-          )}
-
-          {/* End Call */}
-          <button
-            onClick={callState === "outgoing" ? declineCall : endCall}
-            className="p-1.5 rounded-full bg-red-600 hover:bg-red-700 active:scale-95 text-white transition-all"
-            title="End Call"
-          >
-            <PhoneOff size={14} />
-          </button>
+          <button type="button" onClick={endOrCancel} aria-label="End call" className="flex h-8 w-12 items-center justify-center rounded bg-[#d92d20] hover:bg-[#b42318]"><PhoneOff size={15} /></button>
         </div>
       </div>
     );
   }
 
-  // FULLSCREEN CALL OVERLAY 
+  // ── full screen ─────────────────────────────────────────────────────────────
+  const remoteList = Object.entries(remoteStreams);
+  const main = swapped ? localStream : remoteStream;
+  const pip = swapped ? remoteStream : localStream;
+  const tiles = remoteList.length + (localStream && !isCameraOff ? 1 : 0);
+  const gridCols = tiles <= 1 ? "grid-cols-1" : tiles === 2 ? "grid-cols-1 sm:grid-cols-2" : tiles <= 4 ? "grid-cols-2" : "grid-cols-2 lg:grid-cols-3";
+
   return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-between bg-zinc-950 text-white select-none overflow-hidden touch-none">
-      {/* Background Ambience / Blur */}
-      <div className="absolute top-1/4 left-1/4 h-[500px] w-[500px] rounded-full bg-emerald-500/10 blur-[130px] pointer-events-none animate-pulse-slow z-0" />
-      <div className="absolute bottom-1/4 right-1/4 h-[500px] w-[500px] rounded-full bg-sky-500/10 blur-[130px] pointer-events-none animate-pulse z-0" />
+    <div className="fixed inset-0 z-50 flex flex-col bg-[#10100e] text-white" role="dialog" aria-label={`${title} call`} aria-modal="true">
+      {audioLayer}
 
-      {/* Top Header Bar with Minimize & Controls */}
-      <header className="relative z-30 w-full flex items-center justify-between px-4 sm:px-6 py-4 bg-gradient-to-b from-black/70 via-black/30 to-transparent">
-        <div className="flex items-center gap-2 sm:gap-3">
-          {/* Minimize Call Button */}
-          <button
-            onClick={() => setIsMinimized(true)}
-            className="p-2 rounded-full bg-white/10 hover:bg-white/20 active:scale-95 text-zinc-200 hover:text-white transition-all backdrop-blur-md border border-white/10 cursor-pointer flex items-center gap-1"
-            title="Minimize Call Screen (Use App During Call)"
-          >
-            <ChevronDown size={18} />
+      <header className="relative z-20 flex shrink-0 items-center justify-between gap-3 px-4 py-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <button type="button" onClick={() => actions().setIsMinimized(true)} aria-label="Minimise call" className="flex h-9 w-9 items-center justify-center rounded-md bg-white/10 hover:bg-white/20">
+            <ChevronDown size={19} />
           </button>
-
-          <div className="flex flex-col text-left">
-            <span className="text-sm font-semibold text-zinc-300 flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-              {callType === "video" ? "QuickConnect Video Call" : "QuickConnect Voice Call"}
-            </span>
-            <span className="text-xs text-zinc-400">
-              {callState === "connected" ? (
-                <span className="font-mono text-emerald-400 font-medium">
-                  {formatTime(callDuration)}
-                </span>
-              ) : callState === "outgoing" ? (
-                "Ringing..."
-              ) : (
-                "Incoming..."
-              )}
-            </span>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">{title}</p>
+            <p className="text-xs tabular-nums text-white/60">{status}</p>
           </div>
         </div>
 
-        {/* Volume & Frame Fit Controls */}
-        <div className="flex items-center gap-2 sm:gap-3">
-          {/* Fit / Cover toggle for 1-to-1 video calls */}
-          {callState === "connected" && callType === "video" && !isGroupCall && (
-            <button
-              onClick={() => setFitMode((prev) => (prev === "cover" ? "contain" : "cover"))}
-              className="p-2 sm:px-3 sm:py-1.5 rounded-full bg-white/10 hover:bg-white/20 active:scale-95 text-zinc-200 hover:text-white transition-all backdrop-blur-md border border-white/10 flex items-center gap-1.5 text-xs font-medium cursor-pointer"
-              title={fitMode === "cover" ? "Switch to Fit Frame (Full View)" : "Switch to Fill Screen"}
-            >
-              {fitMode === "cover" ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
-              <span className="hidden sm:inline">
-                {fitMode === "cover" ? "Fit Frame" : "Fill Screen"}
-              </span>
-            </button>
+        <div className="relative">
+          <button type="button" onClick={() => setShowVolume((v) => !v)} aria-label="Call volume" aria-expanded={showVolume} className="flex h-9 items-center gap-2 rounded-md bg-white/10 px-3 text-sm hover:bg-white/20">
+            <VolumeIcon size={17} />
+            <span className="tabular-nums">{Math.round(callVolume * 100)}%</span>
+          </button>
+          {showVolume && (
+            <div className="absolute right-0 top-11 z-30 w-56 rounded-lg border border-white/15 bg-[#1c1c19] p-4">
+              <label htmlFor="call-volume" className="mb-2 block text-xs text-white/60">Their volume</label>
+              <input
+                id="call-volume"
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={callVolume}
+                onChange={(e) => actions().setCallVolume(parseFloat(e.target.value))}
+                className="w-full accent-[#ff8f55]"
+              />
+            </div>
           )}
-
-          {/* Swap Video View (Local vs Remote PiP) */}
-          {callState === "connected" && callType === "video" && !isGroupCall && localStream && (
-            <button
-              onClick={() => setIsSwapped((prev) => !prev)}
-              className="p-2 rounded-full bg-white/10 hover:bg-white/20 active:scale-95 text-zinc-200 hover:text-white transition-all backdrop-blur-md border border-white/10 cursor-pointer"
-              title="Swap main & picture-in-picture view"
-            >
-              <ArrowLeftRight size={16} />
-            </button>
-          )}
-
-          {/* Volume Control Bar & Slider */}
-          <div className="relative flex items-center">
-            <button
-              onClick={() => setShowVolumeSlider((prev) => !prev)}
-              className={`p-2 rounded-full transition-all backdrop-blur-md border border-white/10 cursor-pointer flex items-center gap-1 ${
-                ringVolume === 0
-                  ? "bg-red-500/80 text-white"
-                  : "bg-white/10 hover:bg-white/20 text-zinc-200 hover:text-white"
-              }`}
-              title="Adjust Volume"
-            >
-              {getVolumeIcon()}
-              <span className="text-xs font-mono font-semibold px-0.5">
-                {Math.round(ringVolume * 100)}%
-              </span>
-            </button>
-
-            {/* Volume Slider Popup */}
-            {showVolumeSlider && (
-              <div className="absolute right-0 top-12 z-40 bg-zinc-900/95 border border-white/15 backdrop-blur-xl p-3.5 rounded-2xl shadow-2xl flex flex-col items-center gap-2.5 w-60">
-                <div className="flex items-center justify-between w-full text-xs text-zinc-300 font-medium">
-                  <span>Call Volume</span>
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      value={Math.round(ringVolume * 100)}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value, 10);
-                        if (!isNaN(val)) {
-                          setRingVolume(Math.max(0, Math.min(100, val)) / 100);
-                        }
-                      }}
-                      className="w-10 text-center bg-zinc-800 border border-white/10 rounded px-1 py-0.5 text-xs font-mono font-bold text-emerald-400 focus:outline-none focus:border-emerald-500"
-                    />
-                    <span className="font-mono text-emerald-400 text-xs">%</span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 w-full">
-                  <button
-                    onClick={() => setRingVolume(ringVolume === 0 ? 0.2 : 0)}
-                    className="p-1 text-zinc-400 hover:text-white transition-colors cursor-pointer"
-                    title={ringVolume === 0 ? "Unmute" : "Mute"}
-                  >
-                    {ringVolume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
-                  </button>
-                  <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    value={ringVolume}
-                    onChange={(e) => setRingVolume(parseFloat(e.target.value))}
-                    className="w-full h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
-                  />
-                </div>
-
-                {/* Quick Precision Presets */}
-                <div className="flex items-center justify-between w-full pt-1 border-t border-white/10 text-[11px]">
-                  {[0, 0.25, 0.5, 0.75, 1].map((preset) => (
-                    <button
-                      key={preset}
-                      onClick={() => setRingVolume(preset)}
-                      className={`px-2 py-0.5 rounded transition-all cursor-pointer ${
-                        Math.round(ringVolume * 100) === Math.round(preset * 100)
-                          ? "bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30"
-                          : "text-zinc-400 hover:text-zinc-200 hover:bg-white/5"
-                      }`}
-                    >
-                      {preset === 0 ? "0%" : `${Math.round(preset * 100)}%`}
-                    </button>
-                  ))}
-                </div>
-
-                <span className="text-[10px] text-zinc-500 text-center w-full">
-                  Press - / + or F2 / F3 for 1% step
-                </span>
-              </div>
-            )}
-          </div>
         </div>
       </header>
 
-      {/* Main Body Area: Video Stream / Audio Avatar */}
-      <main className="relative flex-1 w-full h-full flex items-center justify-center overflow-hidden">
-        {/* Hidden Audio Elements for Audio Calls */}
-        {callType === "audio" && (
-          <div className="absolute w-0 h-0 opacity-0 pointer-events-none">
-            {isGroupCall ? (
-              activeRemoteStreams.map(([userId, stream]) => (
-                <VideoStream key={userId} stream={stream} />
-              ))
-            ) : (
-              <video ref={remoteAudioRef} autoPlay playsInline />
-            )}
-          </div>
-        )}
-
-        {/* Video Call Full-screen Feeds */}
-        {callState === "connected" && callType === "video" ? (
-          <div className="absolute inset-0 h-full w-full bg-zinc-950 flex items-center justify-center">
-            {isGroupCall ? (
-              <div className={`w-full h-full grid ${gridCols} gap-2 p-2 sm:p-4`}>
-                {/* Local user tile in group video call */}
-                {localStream && !isCameraOff && (
-                  <div className="relative bg-zinc-900 rounded-2xl overflow-hidden border border-white/10 shadow-lg flex items-center justify-center">
-                    <VideoStream stream={localStream} objectFit="cover" isLocal={true} isMirrored={!isScreenSharing} />
-                    <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-md px-3 py-1 rounded-full text-xs font-medium border border-white/10 text-zinc-200">
-                      You {isMuted && "(Muted)"}
-                    </div>
-                  </div>
-                )}
-                {activeRemoteStreams.map(([userId, stream]) => (
-                  <div
-                    key={userId}
-                    className="relative bg-zinc-900 rounded-2xl overflow-hidden border border-white/10 shadow-lg flex items-center justify-center"
-                  >
-                    <VideoStream stream={stream} objectFit="cover" />
-                    <div className="absolute bottom-3 left-3 bg-black/60 backdrop-blur-md px-3 py-1 rounded-full text-xs font-medium border border-white/10">
-                      {participants[userId]?.name || "Participant"}
-                    </div>
-                  </div>
-                ))}
-                {totalTiles === 0 && (
-                  <div className="col-span-full h-full flex flex-col items-center justify-center bg-zinc-950 text-zinc-400 gap-3">
-                    <Avatar src={displayAvatar} name={displayName || "?"} size="xl" />
-                    <p className="text-sm font-semibold animate-pulse">Waiting for others to join...</p>
-                  </div>
-                )}
-              </div>
-            ) : (
-              /* 1-to-1 Video Feed */
-              <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
-                {mainStream ? (
-                  <>
-                    {/* Ambient Background for Letterbox (WhatsApp/Apple Style) */}
-                    {fitMode === "contain" && (
-                      <div className="absolute inset-0 overflow-hidden opacity-30 blur-3xl scale-110 pointer-events-none">
-                        <VideoStream stream={mainStream} objectFit="cover" isMirrored={isMainMirrored} />
-                      </div>
-                    )}
-                    <VideoStream
-                      stream={mainStream}
-                      objectFit={fitMode}
-                      isMirrored={isMainMirrored}
-                      className="relative z-10"
-                    />
-                  </>
-                ) : (
-                  <div className="h-full w-full flex flex-col items-center justify-center bg-zinc-950 text-zinc-400 gap-4">
-                    <Avatar src={displayAvatar} name={displayName || "?"} size="xl" className="h-28 w-28 text-4xl" />
-                    <p className="text-sm font-medium animate-pulse text-zinc-400">
-                      Waiting for video stream...
-                    </p>
-                  </div>
-                )}
-
-                {/* WhatsApp Local Video Picture-in-Picture (PiP) */}
-                {pipStream && !isCameraOff && (
-                  <div
-                    onClick={() => setIsSwapped((prev) => !prev)}
-                    className="absolute top-4 right-4 sm:top-6 sm:right-6 w-28 h-40 sm:w-36 sm:h-52 rounded-2xl overflow-hidden border-2 border-white/20 shadow-2xl bg-zinc-900 z-20 cursor-pointer hover:border-emerald-400/60 hover:scale-105 transition-all duration-200 group"
-                    title="Click to swap view"
-                  >
-                    <VideoStream stream={pipStream} isLocal={!isSwapped} isMirrored={isPipMirrored} objectFit="cover" />
-                    <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                      <ArrowLeftRight size={20} className="text-white drop-shadow-md" />
-                    </div>
-                    <div className="absolute bottom-1.5 left-1.5 bg-black/60 backdrop-blur-md px-1.5 py-0.5 rounded text-[10px] font-medium text-zinc-300">
-                      {isSwapped ? displayName : "You"}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        ) : (
-          /* Incoming / Outgoing / Audio Call Central Avatar Screen */
-          <div className="relative z-20 flex flex-col items-center justify-center gap-6 max-w-sm px-6">
-            <div className="relative flex items-center justify-center">
-              <div
-                className={`absolute inset-0 rounded-full bg-emerald-500/20 scale-125 border border-emerald-500/20 ${
-                  callState === "connected" ? "scale-110" : "animate-ping"
-                }`}
-              />
-              <div
-                className={`absolute inset-0 rounded-full bg-emerald-500/10 scale-150 border border-emerald-500/10 ${
-                  callState === "connected" ? "scale-125" : "animate-pulse"
-                }`}
-              />
-              <Avatar
-                src={displayAvatar}
-                name={displayName || "?"}
-                size="xl"
-                className="relative z-10 border-4 border-white/20 shadow-2xl h-28 w-28 text-4xl"
-              />
+      <main className="relative z-10 min-h-0 flex-1">
+        {hasVideo && connected ? (
+          isGroupCall ? (
+            <div className={cn("grid h-full gap-2 p-2 sm:p-4", gridCols)}>
+              {localStream && !isCameraOff && (
+                <div className="relative overflow-hidden rounded-lg bg-black">
+                  <VideoTile stream={localStream} mirrored={!isScreenSharing} />
+                  <span className="absolute bottom-2 left-2 rounded bg-black/60 px-2 py-0.5 text-xs">You{isMuted && " · muted"}</span>
+                </div>
+              )}
+              {remoteList.map(([id, stream]) => (
+                <div key={id} className="relative overflow-hidden rounded-lg bg-black">
+                  <VideoTile stream={stream} />
+                  <span className="absolute bottom-2 left-2 rounded bg-black/60 px-2 py-0.5 text-xs">{participants[id]?.name ?? "Participant"}</span>
+                </div>
+              ))}
+              {tiles === 0 && <p className="col-span-full flex items-center justify-center text-white/60">Waiting for others to join…</p>}
             </div>
-
-            <div className="space-y-1.5 text-center">
-              <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-white drop-shadow-md">
-                {displayName}
-              </h2>
-              <p className="text-sm font-medium text-zinc-400 tracking-wide">
-                {callState === "outgoing" && "Ringing..."}
-                {callState === "incoming" &&
-                  `Incoming ${isGroupCall ? "Group " : ""}${callType === "video" ? "Video" : "Voice"} Call`}
-                {callState === "connected" && (
-                  <span className="font-mono text-emerald-400 font-semibold text-base">
-                    {formatTime(callDuration)}
-                  </span>
-                )}
-              </p>
+          ) : (
+            <div className="relative h-full">
+              {main ? <VideoTile stream={main} fit="contain" mirrored={swapped && !isScreenSharing} /> : (
+                <div className="flex h-full flex-col items-center justify-center gap-3 text-white/60">
+                  <Avatar src={avatar} name={title} size="xl" />
+                  <p className="text-sm">Waiting for video…</p>
+                </div>
+              )}
+              {pip && !isCameraOff && (
+                <button type="button" onClick={() => setSwapped((v) => !v)} aria-label="Swap videos" className="absolute right-4 top-2 h-40 w-28 overflow-hidden rounded-lg border-2 border-white/30 bg-black sm:w-36">
+                  <VideoTile stream={pip} mirrored={!swapped && !isScreenSharing} />
+                </button>
+              )}
+            </div>
+          )
+        ) : isGroupCall && connected ? (
+          <ul className="mx-auto flex h-full max-w-xl flex-wrap content-center items-start justify-center gap-6 p-6">
+            {[...Object.values(participants), { id: "me", name: "You", avatarUrl: null }].map((p) => (
+              <li key={p.id} className="flex w-24 flex-col items-center gap-2 text-center">
+                <Avatar src={p.avatarUrl} name={p.name} size="lg" />
+                <span className="w-full truncate text-sm">{p.name}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-6 px-6 text-center">
+            <div className="relative">
+              {callState !== "connected" && <span className="absolute inset-0 animate-ring rounded-full bg-white/15" aria-hidden />}
+              <Avatar src={avatar} name={title} size="xl" isGroup={isGroupCall} className="relative h-28 w-28 text-4xl" />
+            </div>
+            <div>
+              <h2 className="font-display text-3xl">{title}</h2>
+              <p className="mt-1.5 text-sm tabular-nums text-white/60">{status}</p>
             </div>
           </div>
         )}
       </main>
 
-      {/* Floating Control Dock (WhatsApp Style) */}
-      <footer className="relative z-30 w-full flex justify-center pb-8 pt-4 px-4 bg-gradient-to-t from-black/80 via-black/40 to-transparent">
+      <footer className="relative z-20 flex shrink-0 justify-center px-4 pb-8 pt-4">
         {callState === "incoming" ? (
-          <div className="flex items-center justify-around w-full max-w-xs px-4">
-            {/* Decline Call */}
-            <button
-              onClick={declineCall}
-              className="flex flex-col items-center gap-2 group focus:outline-none cursor-pointer"
-            >
-              <div className="h-16 w-16 rounded-full bg-red-600 hover:bg-red-700 active:scale-95 flex items-center justify-center shadow-2xl transition-all duration-150">
-                <PhoneOff size={28} className="text-white" />
-              </div>
-              <span className="text-xs font-semibold text-zinc-300 group-hover:text-white">Decline</span>
-            </button>
-
-            {/* Accept Call */}
-            <button
-              onClick={handleAccept}
-              className="flex flex-col items-center gap-2 group focus:outline-none cursor-pointer"
-            >
-              <div className="h-16 w-16 rounded-full bg-emerald-600 hover:bg-emerald-700 active:scale-95 flex items-center justify-center shadow-2xl transition-all duration-150 animate-bounce">
-                <Phone size={28} className="text-white" />
-              </div>
-              <span className="text-xs font-semibold text-zinc-300 group-hover:text-white">Accept</span>
-            </button>
+          <div className="flex items-center gap-10">
+            <div className="flex flex-col items-center gap-2">
+              <ControlButton label="Decline call" tone="end" onClick={() => actions().declineCall()}><PhoneOff size={22} /></ControlButton>
+              <span className="text-xs text-white/70">Decline</span>
+            </div>
+            <div className="flex flex-col items-center gap-2">
+              <button type="button" onClick={accept} aria-label="Accept call" className="flex h-12 w-12 items-center justify-center rounded-full bg-[#2f7d4f] text-white hover:bg-[#256b43]">
+                <Phone size={22} />
+              </button>
+              <span className="text-xs text-white/70">Accept</span>
+            </div>
           </div>
         ) : (
-          /* Active / Outgoing Call Controls Dock */
-          <div className="flex items-center gap-3 sm:gap-4 px-4 sm:px-6 py-3 rounded-full bg-zinc-900/80 border border-white/15 backdrop-blur-2xl shadow-2xl">
-            {/* Mute Mic Toggle */}
-            <button
-              onClick={toggleMute}
-              disabled={callState === "outgoing"}
-              className={`h-12 w-12 rounded-full flex items-center justify-center border transition-all duration-150 active:scale-95 cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
-                isMuted
-                  ? "bg-red-500 border-red-400 text-white"
-                  : "bg-white/10 hover:bg-white/20 border-white/15 text-zinc-200 hover:text-white"
-              }`}
-              title={isMuted ? "Unmute Microphone" : "Mute Microphone"}
-            >
+          <div className="flex items-center gap-3 rounded-full bg-white/10 p-2">
+            <ControlButton label={isMuted ? "Unmute microphone" : "Mute microphone"} active={isMuted} disabled={!connected} onClick={() => actions().toggleMute()}>
               {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
-            </button>
-
-            {/* Camera Toggle for Video Calls */}
-            {callType === "video" && (
-              <button
-                onClick={toggleCamera}
-                disabled={callState === "outgoing"}
-                className={`h-12 w-12 rounded-full flex items-center justify-center border transition-all duration-150 active:scale-95 cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
-                  isCameraOff
-                    ? "bg-red-500 border-red-400 text-white"
-                    : "bg-white/10 hover:bg-white/20 border-white/15 text-zinc-200 hover:text-white"
-                }`}
-                title={isCameraOff ? "Turn On Camera" : "Turn Off Camera"}
-              >
+            </ControlButton>
+            {hasVideo && (
+              <ControlButton label={isCameraOff ? "Turn camera on" : "Turn camera off"} active={isCameraOff} disabled={!connected} onClick={() => actions().toggleCamera()}>
                 {isCameraOff ? <VideoOff size={20} /> : <Video size={20} />}
-              </button>
+              </ControlButton>
             )}
-
-            {/* Screen Share Toggle for Video Calls */}
-            {callType === "video" && (
-              <button
-                onClick={toggleScreenShare}
-                disabled={callState === "outgoing"}
-                className={`h-12 w-12 rounded-full flex items-center justify-center border transition-all duration-150 active:scale-95 cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
-                  isScreenSharing
-                    ? "bg-emerald-500 border-emerald-400 text-white"
-                    : "bg-white/10 hover:bg-white/20 border-white/15 text-zinc-200 hover:text-white"
-                }`}
-                title={isScreenSharing ? "Stop Sharing Screen" : "Share Screen"}
-              >
+            {canShare && (
+              <ControlButton label={isScreenSharing ? "Stop sharing screen" : "Share screen"} active={isScreenSharing} disabled={!connected} onClick={() => void actions().toggleScreenShare()}>
                 {isScreenSharing ? <MonitorOff size={20} /> : <MonitorUp size={20} />}
-              </button>
+              </ControlButton>
             )}
-
-            {/* Speaker / Earpiece Toggle for Audio Calls */}
-            {callType === "audio" && (
-              <button
-                onClick={() => setIsSpeaker(!isSpeaker)}
-                disabled={callState === "outgoing"}
-                className={`h-12 w-12 rounded-full flex items-center justify-center border transition-all duration-150 active:scale-95 cursor-pointer disabled:opacity-40 disabled:pointer-events-none ${
-                  isSpeaker
-                    ? "bg-white/10 hover:bg-white/20 border-white/15 text-zinc-200 hover:text-white"
-                    : "bg-red-500 border-red-400 text-white"
-                }`}
-                title={isSpeaker ? "Speakerphone active" : "Speakerphone off"}
-              >
-                {isSpeaker ? <Volume2 size={20} /> : <VolumeX size={20} />}
-              </button>
-            )}
-
-            {/* End / Cancel Call Button */}
-            <button
-              onClick={callState === "outgoing" ? declineCall : endCall}
-              className="h-12 w-12 rounded-full bg-red-600 hover:bg-red-700 active:scale-95 flex items-center justify-center shadow-lg transition-all duration-150 cursor-pointer border border-red-500"
-              title={callState === "outgoing" ? "Cancel Call" : "End Call"}
-            >
-              <PhoneOff size={22} className="text-white" />
-            </button>
+            <ControlButton label={callState === "outgoing" ? "Cancel call" : "End call"} tone="end" onClick={endOrCancel}>
+              <PhoneOff size={21} />
+            </ControlButton>
           </div>
         )}
       </footer>

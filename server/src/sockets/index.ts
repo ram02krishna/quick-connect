@@ -4,9 +4,10 @@ import { env } from "../config/env.js";
 import { SOCKET_EVENTS } from "./events.js";
 import { handleUserConnect, handleUserDisconnect } from "./presence.js";
 import { setupChatSockets } from "./chat.socket.js";
+import { setupCallSockets } from "./call.socket.js";
 
 export function initializeSockets(io: Server) {
-  // check JWT token before letting the socket connect
+  // Verify the JWT before letting a socket connect.
   io.use((socket: Socket, next) => {
     const token = socket.handshake.auth?.token || socket.handshake.query?.token;
 
@@ -18,34 +19,30 @@ export function initializeSockets(io: Server) {
       const rawToken = token.startsWith("Bearer ") ? token.split(" ")[1] : token;
       const payload = jwt.verify(rawToken, env.JWT_SECRET) as { id: string; email: string };
 
-      (socket as any).userId = payload.id;
-      (socket as any).email = payload.email;
-
+      // socket.data (unlike ad-hoc properties) is restored when a dropped connection is recovered.
+      socket.data.userId = payload.id;
       next();
-    } catch (err) {
-      console.error("Socket auth failed:", err);
+    } catch {
       next(new Error("Authentication error: Invalid or expired token"));
     }
   });
 
   io.on(SOCKET_EVENTS.CONNECTION, async (socket: Socket) => {
-    const userId = (socket as any).userId;
+    const userId = socket.data.userId as string | undefined;
     if (!userId) {
       socket.disconnect(true);
       return;
     }
 
-    // join a user-specific room so we can send direct events to this user
+    // A personal room lets the server address every tab/device a user has open.
     await socket.join(`user:${userId}`);
-
-    // mark user as online and notify their contacts
     await handleUserConnect(userId, socket.id, io);
 
-    // set up chat room / message / call handlers
     setupChatSockets(io, socket);
+    setupCallSockets(io, socket);
 
     socket.on(SOCKET_EVENTS.DISCONNECT, async () => {
-      await handleUserDisconnect(userId, socket.id, io);
+      await handleUserDisconnect(userId, io);
     });
   });
 }

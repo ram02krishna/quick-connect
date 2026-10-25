@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import * as messageService from "../services/message.service.js";
 import { sendSuccess } from "../utils/ApiResponse.js";
-import { io } from "../server.js";
+import { getIO } from "../sockets/io.js";
 import { SOCKET_EVENTS } from "../sockets/events.js";
 
 export async function sendNewMessage(req: Request, res: Response) {
@@ -14,7 +14,7 @@ export async function sendNewMessage(req: Request, res: Response) {
     attachments
   );
 
-  // Emit to all members using memberIds returned by the service—no extra DB query needed.
+  const io = getIO();
   for (const memberId of memberIds) {
     io.to(`user:${memberId}`).emit(SOCKET_EVENTS.MESSAGE_NEW, message);
   }
@@ -23,7 +23,7 @@ export async function sendNewMessage(req: Request, res: Response) {
 }
 
 export async function fetchChatMessages(req: Request, res: Response) {
-  const cursor = req.query.cursor as string | undefined;
+  const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
   const limit = Number(req.query.limit) || 30;
 
   const messages = await messageService.getChatMessages(
@@ -45,6 +45,7 @@ export async function deleteChatMessage(req: Request, res: Response) {
   );
 
   if (result.scope === "everyone") {
+    const io = getIO();
     for (const memberId of result.memberIds) {
       io.to(`user:${memberId}`).emit(SOCKET_EVENTS.MESSAGE_DELETED_FOR_EVERYONE, {
         chatId: result.chatId,
